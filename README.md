@@ -53,6 +53,10 @@ Set required variables based on `AI_PROVIDER`:
 - `AI_GATEWAY`
 - `MOONSHOT` (国内厂商：Moonshot/Kimi)
 - `ZAI` (国内厂商：智谱 Z.AI)
+- `ZAI_CN` (智谱国内普通 API，`https://open.bigmodel.cn/api/paas/v4`)
+- `ZAI_GLOBAL` (智谱国际普通 API，`https://api.z.ai/api/paas/v4`)
+- `ZAI_CODING_CN` (智谱国内 Coding API，`https://open.bigmodel.cn/api/coding/paas/v4`)
+- `ZAI_CODING_GLOBAL` (智谱国际 Coding API，`https://api.z.ai/api/coding/paas/v4`)
 - `MINIMAX` (国内厂商：MiniMax)
 - `SYNTHETIC`
 - `OPENCODE_ZEN`
