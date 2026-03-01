@@ -86,6 +86,28 @@ const TUI_MAX_SESSION_MS = Number.parseInt(
 const CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY =
   "sk-placeholder-for-custom-provider";
 
+const AI_PROVIDER = process.env.AI_PROVIDER?.trim() || "";
+const PROVIDER_BASE_URL = process.env.PROVIDER_BASE_URL?.trim() || "";
+const PROVIDER_API_KEY = process.env.PROVIDER_API_KEY?.trim() || "";
+
+const VALID_ENV_AI_PROVIDERS = [
+  "openai",
+  "anthropic",
+  "google",
+  "openrouter",
+  "ai-gateway",
+  "moonshot",
+  "zai",
+  "minimax",
+  "synthetic",
+  "opencode-zen",
+  "volcengine-plan",
+  "bedrock",
+  "bailian",
+  "ollama",
+  "custom-provider",
+];
+
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
 }
@@ -103,6 +125,132 @@ function isConfigured() {
   } catch {
     return false;
   }
+}
+
+function inferCustomApiTypeByProvider(providerName) {
+  const p = String(providerName || "").trim().toLowerCase();
+  if (p === "anthropic" || p === "bedrock") return "anthropic-messages";
+  return "openai-completions";
+}
+
+function validateEnvProviderConfig() {
+  const enabled = Boolean(AI_PROVIDER);
+  const values = {
+    aiProvider: AI_PROVIDER,
+    providerBaseUrl: PROVIDER_BASE_URL,
+    providerApiKey: PROVIDER_API_KEY,
+  };
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      valid: false,
+      values,
+      allowedProviders: VALID_ENV_AI_PROVIDERS,
+      error: null,
+    };
+  }
+
+  if (!VALID_ENV_AI_PROVIDERS.includes(AI_PROVIDER)) {
+    return {
+      enabled: true,
+      valid: false,
+      values,
+      allowedProviders: VALID_ENV_AI_PROVIDERS,
+      error:
+        `Invalid AI_PROVIDER: ${AI_PROVIDER}. ` +
+        `Allowed values: ${VALID_ENV_AI_PROVIDERS.join(", ")}. ` +
+        "Please update Railway Variables (AI_PROVIDER / PROVIDER_BASE_URL / PROVIDER_API_KEY).",
+    };
+  }
+
+  if (!PROVIDER_BASE_URL) {
+    return {
+      enabled: true,
+      valid: false,
+      values,
+      allowedProviders: VALID_ENV_AI_PROVIDERS,
+      error:
+        "PROVIDER_BASE_URL is required when AI_PROVIDER is set. " +
+        "Please update Railway Variables.",
+    };
+  }
+
+  try {
+    const u = new URL(PROVIDER_BASE_URL);
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      throw new Error("invalid-protocol");
+    }
+  } catch {
+    return {
+      enabled: true,
+      valid: false,
+      values,
+      allowedProviders: VALID_ENV_AI_PROVIDERS,
+      error:
+        `Invalid PROVIDER_BASE_URL: ${PROVIDER_BASE_URL}. ` +
+        "Expected an absolute URL starting with http:// or https://. " +
+        "Please update Railway Variables.",
+    };
+  }
+
+  if (!PROVIDER_API_KEY) {
+    return {
+      enabled: true,
+      valid: false,
+      values,
+      allowedProviders: VALID_ENV_AI_PROVIDERS,
+      error:
+        "PROVIDER_API_KEY is required when AI_PROVIDER is set. " +
+        "Please update Railway Variables.",
+    };
+  }
+
+  return {
+    enabled: true,
+    valid: true,
+    values,
+    allowedProviders: VALID_ENV_AI_PROVIDERS,
+    error: null,
+  };
+}
+
+function buildPayloadFromEnvProvider(rawPayload = {}) {
+  const envValidation = validateEnvProviderConfig();
+  if (!envValidation.enabled) {
+    return {
+      ok: false,
+      error:
+        "ProviderFromEnv was selected, but AI_PROVIDER is empty. " +
+        "Please set Railway Variables AI_PROVIDER / PROVIDER_BASE_URL / PROVIDER_API_KEY.",
+    };
+  }
+  if (!envValidation.valid) {
+    return {
+      ok: false,
+      error: envValidation.error,
+    };
+  }
+
+  const rawModel = typeof rawPayload.model === "string" ? rawPayload.model.trim() : "";
+  let customModelId = "";
+  if (rawModel) {
+    const prefixed = `${AI_PROVIDER}/`;
+    customModelId = rawModel.startsWith(prefixed) ? rawModel.slice(prefixed.length) : rawModel;
+  }
+
+  return {
+    ok: true,
+    payload: {
+      ...rawPayload,
+      authChoice: "custom-provider",
+      authSecret: PROVIDER_API_KEY,
+      customProviderName: AI_PROVIDER,
+      customBaseUrl: PROVIDER_BASE_URL,
+      customApiType: inferCustomApiTypeByProvider(AI_PROVIDER),
+      customModelId,
+    },
+  };
 }
 
 let gatewayProc = null;
@@ -355,6 +503,7 @@ app.get("/setup", requireSetupAuth, (_req, res) => {
 
 app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   const { version, channelsHelp } = await getOpenclawInfo();
+  const envProvider = validateEnvProviderConfig();
 
   const authGroups = [
     {
@@ -528,6 +677,28 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
     },
   ];
 
+  if (envProvider.enabled) {
+    authGroups.unshift({
+      value: "provider-from-env",
+      label: "ProviderFromEnv",
+      hint: envProvider.valid ? `AI_PROVIDER=${envProvider.values.aiProvider}` : "Invalid Railway Variables",
+      custom: true,
+      fromEnv: true,
+      options: [
+        {
+          value: "provider-from-env",
+          label: "Use AI_PROVIDER / PROVIDER_BASE_URL / PROVIDER_API_KEY",
+        },
+      ],
+      defaults: {
+        customProviderName: envProvider.values.aiProvider || "",
+        customBaseUrl: envProvider.values.providerBaseUrl || "",
+        customApiType: inferCustomApiTypeByProvider(envProvider.values.aiProvider),
+        customModelId: "",
+      },
+    });
+  }
+
   res.json({
     configured: isConfigured(),
     gatewayTarget: GATEWAY_TARGET,
@@ -535,6 +706,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
     channelsAddHelp: channelsHelp,
     authGroups,
     tuiEnabled: ENABLE_WEB_TUI,
+    envProvider,
   });
 });
 
@@ -828,6 +1000,7 @@ function normalizeDeviceLists(value) {
 }
 
 const VALID_AUTH_CHOICES = [
+  "provider-from-env",
   "openai-api-key",
   "apiKey",
   "gemini-api-key",
@@ -1086,6 +1259,226 @@ function sanitizeDefaultModelEntries({ providerName, modelId }) {
   }
 }
 
+function inferProviderName(entry = {}) {
+  const model = String(entry.model || "").trim();
+  if (isCustomProvider(entry.authChoice)) {
+    if (entry.authChoice === "custom-provider") {
+      return (entry.customProviderName || "custom").trim() || "custom";
+    }
+    return String(entry.authChoice || "").trim() || "custom";
+  }
+  if (entry.selectedGroup && entry.selectedGroup !== "provider-from-env") {
+    return String(entry.selectedGroup).trim();
+  }
+  if (model.includes("/")) {
+    return model.split("/")[0].trim();
+  }
+  return String(entry.authChoice || "openai").trim();
+}
+
+async function configureStandardProvider(entry) {
+  const providerName = inferProviderName(entry);
+  const apiKey = String(entry.authSecret || "").trim();
+  const profileId = `${providerName}:default`;
+  let extra = "";
+  let ok = true;
+
+  if (!apiKey) {
+    return { ok: true, providerName, output: `[provider] ${providerName} has no api key, skipped auth profile sync\n` };
+  }
+
+  const authProfile = {
+    provider: providerName,
+    mode: "api_key",
+  };
+  const authResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      `auth.profiles.${profileId}`,
+      JSON.stringify(authProfile),
+    ]),
+  );
+  extra += `[provider] auth.profiles.${profileId} exit=${authResult.code}\n`;
+  if (authResult.output) extra += authResult.output;
+  if (authResult.code !== 0) ok = false;
+
+  const authOrderResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      `auth.order.${providerName}`,
+      JSON.stringify([profileId]),
+    ]),
+  );
+  extra += `[provider] auth.order.${providerName} exit=${authOrderResult.code}\n`;
+  if (authOrderResult.output) extra += authOrderResult.output;
+  if (authOrderResult.code !== 0) ok = false;
+
+  const syncAuthStoresResult = syncAuthProfileStores({
+    providerName,
+    profileId,
+    apiKey,
+  });
+  extra +=
+    `[provider] sync auth-profiles changed=${syncAuthStoresResult.changedFiles} ` +
+    `removed=${syncAuthStoresResult.removedProfiles} ` +
+    `files=${syncAuthStoresResult.inspectedFiles} ` +
+    `parseErrors=${syncAuthStoresResult.parseErrors}\n`;
+  if (!syncAuthStoresResult.ok) ok = false;
+
+  return { ok, providerName, output: extra };
+}
+
+function normalizeAgentsFromPayload(payloadAgents, providerEntries) {
+  const providerById = new Map();
+  for (const p of providerEntries) {
+    providerById.set(String(p.id || ""), String(p.model || "").trim());
+  }
+
+  const rawAgents = Array.isArray(payloadAgents) ? payloadAgents : [];
+  const normalized = [];
+  for (let i = 0; i < rawAgents.length; i++) {
+    const raw = rawAgents[i] || {};
+    let name = String(raw.name || "").trim() || `agent${i + 1}`;
+    name = name.replace(/[^A-Za-z0-9_-]/g, "-");
+    if (!name) name = `agent${i + 1}`;
+
+    const providerId = String(raw.providerId || "").trim();
+    const fromProvider = providerId ? providerById.get(providerId) : "";
+    const model = String(raw.model || "").trim() || String(fromProvider || "").trim();
+    if (!model) continue;
+
+    normalized.push({ name, model });
+  }
+
+  if (normalized.length === 0) {
+    const fallback = String(providerEntries[0]?.model || "").trim();
+    if (fallback) {
+      normalized.push({ name: "primary", model: fallback });
+    }
+  }
+
+  const usedNames = new Set();
+  for (let i = 0; i < normalized.length; i++) {
+    const base = normalized[i].name;
+    let candidate = base;
+    let suffix = 2;
+    while (usedNames.has(candidate)) {
+      candidate = `${base}-${suffix}`;
+      suffix += 1;
+    }
+    normalized[i].name = candidate;
+    usedNames.add(candidate);
+  }
+
+  if (!normalized.some((a) => a.name === "primary") && normalized.length > 0) {
+    normalized[0].name = "primary";
+  }
+
+  return normalized;
+}
+
+function applyAgentsModelConfig(agents) {
+  const cfgPath = configPath();
+  if (!fs.existsSync(cfgPath)) {
+    return {
+      ok: false,
+      changed: false,
+      primaryModel: "",
+      reason: "config-not-found",
+    };
+  }
+
+  try {
+    const raw = fs.readFileSync(cfgPath, "utf8");
+    const cfg = raw.trim() ? JSON.parse(raw) : {};
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+      return {
+        ok: false,
+        changed: false,
+        primaryModel: "",
+        reason: "invalid-config-json",
+      };
+    }
+
+    if (!cfg.agents || typeof cfg.agents !== "object" || Array.isArray(cfg.agents)) {
+      cfg.agents = {};
+    }
+    if (
+      !cfg.agents.defaults ||
+      typeof cfg.agents.defaults !== "object" ||
+      Array.isArray(cfg.agents.defaults)
+    ) {
+      cfg.agents.defaults = {};
+    }
+
+    const previousModelMap =
+      cfg.agents.defaults.model &&
+      typeof cfg.agents.defaults.model === "object" &&
+      !Array.isArray(cfg.agents.defaults.model)
+        ? cfg.agents.defaults.model
+        : {};
+    const previousModels =
+      cfg.agents.defaults.models &&
+      typeof cfg.agents.defaults.models === "object" &&
+      !Array.isArray(cfg.agents.defaults.models)
+        ? cfg.agents.defaults.models
+        : {};
+
+    const nextModelMap = {};
+    for (const a of agents) {
+      nextModelMap[a.name] = a.model;
+    }
+
+    let primaryModel = String(nextModelMap.primary || "").trim();
+    if (!primaryModel && agents[0]) {
+      primaryModel = String(agents[0].model || "").trim();
+      if (primaryModel) {
+        nextModelMap.primary = primaryModel;
+      }
+    }
+
+    const nextModels = {};
+    for (const model of new Set(Object.values(nextModelMap).filter(Boolean))) {
+      const existing = previousModels[model];
+      nextModels[model] =
+        existing && typeof existing === "object" && !Array.isArray(existing)
+          ? existing
+          : {};
+    }
+
+    const changed =
+      JSON.stringify(previousModelMap) !== JSON.stringify(nextModelMap) ||
+      JSON.stringify(previousModels) !== JSON.stringify(nextModels);
+
+    if (!changed) {
+      return { ok: true, changed: false, primaryModel, reason: "no-change" };
+    }
+
+    cfg.agents.defaults.model = nextModelMap;
+    cfg.agents.defaults.models = nextModels;
+
+    fs.writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+
+    return { ok: true, changed: true, primaryModel, reason: "updated" };
+  } catch {
+    return {
+      ok: false,
+      changed: false,
+      primaryModel: "",
+      reason: "parse-or-write-error",
+    };
+  }
+}
+
 async function configureCustomProvider(payload) {
   const providerName =
     payload.authChoice === "custom-provider"
@@ -1255,6 +1648,36 @@ function validatePayload(payload) {
       return `Invalid customApiType: must be one of ${validApiTypes.join(", ")}`;
     }
   }
+
+  if (payload.providers !== undefined) {
+    if (!Array.isArray(payload.providers) || payload.providers.length === 0) {
+      return "Invalid providers: must be a non-empty array";
+    }
+    for (const provider of payload.providers) {
+      if (!provider || typeof provider !== "object" || Array.isArray(provider)) {
+        return "Invalid providers: each provider must be an object";
+      }
+      const providerError = validatePayload(provider);
+      if (providerError) return `Invalid provider entry: ${providerError}`;
+    }
+  }
+
+  if (payload.agents !== undefined) {
+    if (!Array.isArray(payload.agents) || payload.agents.length === 0) {
+      return "Invalid agents: must be a non-empty array";
+    }
+    for (const agent of payload.agents) {
+      if (!agent || typeof agent !== "object" || Array.isArray(agent)) {
+        return "Invalid agents: each agent must be an object";
+      }
+      for (const k of ["name", "providerId", "model"]) {
+        if (agent[k] !== undefined && typeof agent[k] !== "string") {
+          return `Invalid agents.${k}: must be a string`;
+        }
+      }
+    }
+  }
+
   return null;
 }
 
@@ -1272,7 +1695,44 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
-    const payload = req.body || {};
+    const rawPayload = req.body || {};
+    let payload = rawPayload;
+
+    if (Array.isArray(rawPayload.providers) && rawPayload.providers.length > 0) {
+      const transformedProviders = [];
+      for (const provider of rawPayload.providers) {
+        const p = provider || {};
+        if (p.authChoice === "provider-from-env") {
+          const transformed = buildPayloadFromEnvProvider(p);
+          if (!transformed.ok) {
+            return res.status(400).json({ ok: false, output: transformed.error });
+          }
+          transformedProviders.push({ ...p, ...transformed.payload });
+        } else {
+          transformedProviders.push(p);
+        }
+      }
+      const firstProvider = transformedProviders[0] || {};
+      payload = {
+        ...rawPayload,
+        providers: transformedProviders,
+        authChoice: firstProvider.authChoice || rawPayload.authChoice,
+        authSecret: firstProvider.authSecret || rawPayload.authSecret,
+        model: firstProvider.model || rawPayload.model,
+        customProviderName:
+          firstProvider.customProviderName || rawPayload.customProviderName,
+        customBaseUrl: firstProvider.customBaseUrl || rawPayload.customBaseUrl,
+        customApiType: firstProvider.customApiType || rawPayload.customApiType,
+        customModelId: firstProvider.customModelId || rawPayload.customModelId,
+      };
+    } else if (rawPayload.authChoice === "provider-from-env") {
+      const transformed = buildPayloadFromEnvProvider(rawPayload);
+      if (!transformed.ok) {
+        return res.status(400).json({ ok: false, output: transformed.error });
+      }
+      payload = transformed.payload;
+    }
+
     const validationError = validatePayload(payload);
     if (validationError) {
       return res.status(400).json({ ok: false, output: validationError });
@@ -1348,23 +1808,62 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       );
       extra += `[config] gateway.trustedProxies exit=${proxiesResult.code}\n`;
 
-      if (isCustomProvider(payload.authChoice)) {
-        extra += "\n[setup] Configuring custom provider...\n";
-        const customProviderResult = await configureCustomProvider(payload);
-        extra += customProviderResult.output;
-        if (!customProviderResult.ok) {
-          return res.status(500).json({
-            ok: false,
-            output:
-              `${onboard.output}${extra}\n` +
-              "[setup] Custom provider setup failed. Check logs above.\n",
-          });
+      const providerEntries =
+        Array.isArray(payload.providers) && payload.providers.length > 0
+          ? payload.providers.map((p, idx) => ({
+              ...p,
+              id: String(p.id || `provider-${idx + 1}`),
+              model: String(p.model || "").trim(),
+            }))
+          : [{ ...payload, id: "provider-1", model: String(payload.model || "").trim() }];
+      extra += `\n[setup] Configuring ${providerEntries.length} provider(s)...\n`;
+
+      for (let i = 0; i < providerEntries.length; i++) {
+        const provider = providerEntries[i];
+        extra += `[setup] Provider #${i + 1} authChoice=${provider.authChoice || "(empty)"}\n`;
+        if (isCustomProvider(provider.authChoice)) {
+          const customProviderResult = await configureCustomProvider(provider);
+          extra += customProviderResult.output;
+          if (!customProviderResult.ok) {
+            return res.status(500).json({
+              ok: false,
+              output:
+                `${onboard.output}${extra}\n` +
+                `[setup] Provider #${i + 1} custom provider setup failed.\n`,
+            });
+          }
+        } else {
+          const stdProviderResult = await configureStandardProvider(provider);
+          extra += stdProviderResult.output;
+          if (!stdProviderResult.ok) {
+            return res.status(500).json({
+              ok: false,
+              output:
+                `${onboard.output}${extra}\n` +
+                `[setup] Provider #${i + 1} standard provider setup failed.\n`,
+            });
+          }
         }
-      } else if (payload.model?.trim()) {
-        extra += `[setup] Setting model to ${payload.model.trim()}...\n`;
+      }
+
+      const normalizedAgents = normalizeAgentsFromPayload(payload.agents, providerEntries);
+      const applyAgentsResult = applyAgentsModelConfig(normalizedAgents);
+      extra +=
+        `[setup] apply agents.defaults.model changed=${applyAgentsResult.changed} ` +
+        `reason=${applyAgentsResult.reason} primary=${applyAgentsResult.primaryModel || "(empty)"}\n`;
+      if (!applyAgentsResult.ok) {
+        return res.status(500).json({
+          ok: false,
+          output:
+            `${onboard.output}${extra}\n` +
+            "[setup] Failed to write multi-agent model config.\n",
+        });
+      }
+
+      if (applyAgentsResult.primaryModel) {
         const modelResult = await runCmd(
           OPENCLAW_NODE,
-          clawArgs(["models", "set", payload.model.trim()]),
+          clawArgs(["models", "set", applyAgentsResult.primaryModel]),
         );
         extra += `[models set] exit=${modelResult.code}\n${modelResult.output || ""}`;
         if (modelResult.code !== 0) {
@@ -1372,7 +1871,7 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
             ok: false,
             output:
               `${onboard.output}${extra}\n` +
-              "[setup] Model setup failed. Check logs above.\n",
+              "[setup] Primary model setup failed. Check logs above.\n",
           });
         }
       }

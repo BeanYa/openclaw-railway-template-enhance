@@ -18,20 +18,17 @@
   document.addEventListener('alpine:init', () => {
     Alpine.data('setupApp', () => ({
       step: 1,
-      totalSteps: 3,
+      totalSteps: 4,
       status: 'Loading...',
       configured: false,
       openclawVersion: '',
       authGroups: [],
-      selectedGroup: '',
-      authChoices: [],
-      selectedAuth: '',
-      authSecret: '',
+      providers: [],
+      agents: [],
       telegramToken: '',
       discordToken: '',
       slackBotToken: '',
       slackAppToken: '',
-      model: '',
       log: '',
       loading: false,
       pairingChannel: '',
@@ -48,11 +45,17 @@
       devicesPaired: [],
       devicesPoller: null,
       devicesRequestInFlight: false,
-      // Custom provider fields
-      customProviderName: '',
-      customBaseUrl: '',
-      customApiType: 'openai-completions',
-      customModelId: '',
+      envProvider: {
+        enabled: false,
+        valid: false,
+        values: {
+          aiProvider: '',
+          providerBaseUrl: '',
+          providerApiKey: '',
+        },
+        allowedProviders: [],
+        error: null,
+      },
       // i18n
       lang: (navigator.language || '').startsWith('zh') ? 'zh' : 'en',
       translations: {
@@ -92,19 +95,23 @@
           modelLabel: 'Model',
           modelPlaceholder: 'e.g. openai/gpt-4.1, anthropic/claude-sonnet-4',
           modelHint: 'Format: provider/model-name',
-          step2Title: 'Channels',
-          step2Desc: 'Connect messaging platforms (optional — can be added later)',
+          step2Title: 'Agents',
+          step2Desc: 'Configure primary and optional additional agents',
+          step3Title: 'Channels',
+          step3Desc: 'Connect messaging platforms (optional — can be added later)',
           telegramPlaceholder: 'Bot token from @BotFather',
           telegramHint: 'Message @BotFather on Telegram and run /newbot',
           discordPlaceholder: 'Bot token from Developer Portal',
           discordHint: 'Enable MESSAGE CONTENT INTENT in Bot → Privileged Gateway Intents',
           slackBotPlaceholder: 'Bot token (xoxb-...)',
           slackAppPlaceholder: 'App token (xapp-...)',
-          step3Title: 'Run Setup',
-          step3Desc: 'Review your configuration and start OpenClaw',
+          step4Title: 'Run Setup',
+          step4Desc: 'Review your configuration and start OpenClaw',
           configSummary: 'Configuration Summary',
           provider: 'Provider',
+          providers: 'Providers',
           auth: 'Auth',
+          agents: 'Agents',
           channels: 'Channels',
           none: 'None',
           runSetupBtn: 'Run Setup',
@@ -142,6 +149,26 @@
           customModelIdLabel: 'Model ID',
           customModelIdPlaceholder: 'e.g. gpt-4, claude-sonnet-4',
           customProviderConfig: 'Custom Provider Config',
+          addProvider: 'Add Provider',
+          removeProvider: 'Remove Provider',
+          providerConfigTitle: 'Provider',
+          providerModel: 'Provider Model',
+          addAgent: 'Add Agent',
+          removeAgent: 'Remove Agent',
+          agentName: 'Agent Name',
+          agentNamePlaceholder: 'e.g. primary, reviewer',
+          agentProvider: 'Provider',
+          agentModel: 'Model',
+          selectProvider: 'Select provider...',
+          noProviderModel: 'Configure at least one provider + model in Step 1 first.',
+          providerFromEnvTitle: 'ProviderFromEnv Variables',
+          providerFromEnvDesc: 'Using Railway Variables (read-only in setup):',
+          aiProviderVar: 'AI_PROVIDER',
+          providerBaseUrlVar: 'PROVIDER_BASE_URL',
+          providerApiKeyVar: 'PROVIDER_API_KEY',
+          envProviderInvalid: 'Environment variable validation failed',
+          envProviderAllowed: 'Allowed AI_PROVIDER values',
+          envProviderFixHint: 'Please update Railway Variables and redeploy/restart if needed.',
         },
         zh: {
           title: '个人 AI 助手',
@@ -179,19 +206,23 @@
           modelLabel: '模型',
           modelPlaceholder: '例如 openai/gpt-4.1, anthropic/claude-sonnet-4',
           modelHint: '格式: provider/model-name',
-          step2Title: '频道',
-          step2Desc: '连接消息平台（可选 — 稍后也可添加）',
+          step2Title: 'Agent',
+          step2Desc: '配置 primary 以及可选的额外 agent',
+          step3Title: '频道',
+          step3Desc: '连接消息平台（可选 — 稍后也可添加）',
           telegramPlaceholder: '来自 @BotFather 的 Bot Token',
           telegramHint: '在 Telegram 上给 @BotFather 发消息并运行 /newbot',
           discordPlaceholder: '来自开发者门户的 Bot Token',
           discordHint: '在 Bot → Privileged Gateway Intents 中启用 MESSAGE CONTENT INTENT',
           slackBotPlaceholder: 'Bot Token (xoxb-...)',
           slackAppPlaceholder: 'App Token (xapp-...)',
-          step3Title: '运行设置',
-          step3Desc: '检查配置并启动 OpenClaw',
+          step4Title: '运行设置',
+          step4Desc: '检查配置并启动 OpenClaw',
           configSummary: '配置摘要',
           provider: '提供商',
+          providers: '提供商',
           auth: '认证',
+          agents: 'Agent',
           channels: '频道',
           none: '无',
           runSetupBtn: '运行设置',
@@ -228,6 +259,26 @@
           customModelIdLabel: '模型 ID',
           customModelIdPlaceholder: '例如 gpt-4, claude-sonnet-4',
           customProviderConfig: '自定义提供商配置',
+          addProvider: '添加 Provider',
+          removeProvider: '移除 Provider',
+          providerConfigTitle: 'Provider',
+          providerModel: 'Provider 模型',
+          addAgent: '添加 Agent',
+          removeAgent: '移除 Agent',
+          agentName: 'Agent 名称',
+          agentNamePlaceholder: '例如 primary, reviewer',
+          agentProvider: 'Provider',
+          agentModel: '模型',
+          selectProvider: '选择 Provider...',
+          noProviderModel: '请先在第 1 步至少配置一个 Provider + 模型。',
+          providerFromEnvTitle: 'ProviderFromEnv 变量',
+          providerFromEnvDesc: '当前使用 Railway Variables（在 setup 中只读显示）：',
+          aiProviderVar: 'AI_PROVIDER',
+          providerBaseUrlVar: 'PROVIDER_BASE_URL',
+          providerApiKeyVar: 'PROVIDER_API_KEY',
+          envProviderInvalid: '环境变量校验失败',
+          envProviderAllowed: 'AI_PROVIDER 可选值',
+          envProviderFixHint: '请在 Railway 的 Variables 中修正后，必要时重新部署/重启。',
         },
       },
 
@@ -239,13 +290,36 @@
         this.lang = this.lang === 'en' ? 'zh' : 'en';
       },
 
-      get isCustomGroup() {
-        const group = this.currentGroup;
-        return group && group.custom === true;
+      get canRunSetup() {
+        if (!this.providers.length) return false;
+        if (!this.providerModelOptions.length) return false;
+        if (!this.agents.length) return false;
+        for (const agent of this.agents) {
+          if (!String(agent.name || '').trim()) return false;
+          if (!String(agent.providerId || '').trim()) return false;
+          if (!String(agent.model || '').trim()) return false;
+        }
+        for (const p of this.providers) {
+          if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
+            return false;
+          }
+        }
+        return true;
       },
 
-      get currentGroup() {
-        return this.authGroups.find(g => g.value === this.selectedGroup);
+      get providerModelOptions() {
+        return this.providers
+          .map(p => {
+            const model = this.getProviderModelValue(p);
+            if (!model) return null;
+            return {
+              id: p.id,
+              label: this.getProviderDisplayLabel(p),
+              model,
+              authChoice: p.selectedAuth,
+            };
+          })
+          .filter(Boolean);
       },
 
       async init() {
@@ -275,9 +349,16 @@
           this.tuiEnabled = j.tuiEnabled || false;
           this.status = j.configured ? this.t('statusConfigured') : this.t('statusNotConfigured');
           this.authGroups = j.authGroups || [];
-          if (this.authGroups.length > 0) {
-            this.selectedGroup = this.authGroups[0].value;
-            this.updateAuthChoices();
+          this.envProvider = j.envProvider || this.envProvider;
+          if (this.authGroups.length > 0 && this.providers.length === 0) {
+            this.providers = [this.createProviderConfig()];
+          }
+          if (this.agents.length === 0) {
+            this.agents = [{ id: this.newId('agent'), name: 'primary', providerId: '', model: '' }];
+          }
+          this.syncAgentProviders();
+          if (this.envProvider.enabled && !this.envProvider.valid && this.envProvider.error) {
+            this.log += '[ProviderFromEnv] ' + this.envProvider.error + '\n';
           }
           if (j.channelsAddHelp && j.channelsAddHelp.indexOf('telegram') === -1) {
             this.log += '\nNote: this openclaw build does not list telegram in `channels add --help`. Telegram auto-add will be skipped.\n';
@@ -289,24 +370,143 @@
         }
       },
 
-      updateAuthChoices() {
-        const group = this.currentGroup;
-        this.authChoices = (group && group.options) ? group.options : [];
-        if (this.authChoices.length > 0) {
-          this.selectedAuth = this.authChoices[0].value;
+      newId(prefix) {
+        return prefix + '-' + Math.random().toString(36).slice(2, 10);
+      },
+
+      getGroupByValue(value) {
+        return this.authGroups.find(g => g.value === value);
+      },
+
+      isCustomGroupFor(provider) {
+        const group = this.getGroupByValue(provider.selectedGroup);
+        return group && group.custom === true;
+      },
+
+      isProviderFromEnvFor(provider) {
+        return provider.selectedGroup === 'provider-from-env' || provider.selectedAuth === 'provider-from-env';
+      },
+
+      createProviderConfig() {
+        const preferredGroup = this.envProvider.enabled ? 'provider-from-env' : (this.authGroups[0] && this.authGroups[0].value) || '';
+        const provider = {
+          id: this.newId('provider'),
+          selectedGroup: preferredGroup,
+          authChoices: [],
+          selectedAuth: '',
+          authSecret: '',
+          model: '',
+          customProviderName: '',
+          customBaseUrl: '',
+          customApiType: 'openai-completions',
+          customModelId: '',
+        };
+        this.updateProviderAuthChoices(provider);
+        return provider;
+      },
+
+      updateProviderAuthChoices(provider) {
+        const group = this.getGroupByValue(provider.selectedGroup);
+        provider.authChoices = (group && group.options) ? group.options : [];
+        provider.selectedAuth = provider.authChoices.length > 0 ? provider.authChoices[0].value : '';
+        if (group && group.value === 'provider-from-env') {
+          provider.selectedAuth = 'provider-from-env';
         }
-        // Auto-fill defaults for custom providers
         if (group && group.defaults) {
-          this.customProviderName = group.defaults.customProviderName || '';
-          this.customBaseUrl = group.defaults.customBaseUrl || '';
-          this.customApiType = group.defaults.customApiType || 'openai-completions';
-          this.customModelId = group.defaults.customModelId || '';
+          provider.customProviderName = group.defaults.customProviderName || '';
+          provider.customBaseUrl = group.defaults.customBaseUrl || '';
+          provider.customApiType = group.defaults.customApiType || 'openai-completions';
+          provider.customModelId = group.defaults.customModelId || '';
         } else {
-          this.customProviderName = '';
-          this.customBaseUrl = '';
-          this.customApiType = 'openai-completions';
-          this.customModelId = '';
+          provider.customProviderName = '';
+          provider.customBaseUrl = '';
+          provider.customApiType = 'openai-completions';
+          provider.customModelId = '';
         }
+        if (this.isProviderFromEnvFor(provider) && this.envProvider && this.envProvider.values) {
+          provider.authSecret = this.envProvider.values.providerApiKey || '';
+          provider.customProviderName = this.envProvider.values.aiProvider || provider.customProviderName;
+          provider.customBaseUrl = this.envProvider.values.providerBaseUrl || provider.customBaseUrl;
+        }
+        this.syncAgentProviders();
+      },
+
+      addProvider() {
+        this.providers.push(this.createProviderConfig());
+        this.syncAgentProviders();
+      },
+
+      removeProvider(index) {
+        if (this.providers.length <= 1) return;
+        const removed = this.providers.splice(index, 1)[0];
+        if (!removed) return;
+        for (const agent of this.agents) {
+          if (agent.providerId === removed.id) {
+            agent.providerId = '';
+            agent.model = '';
+          }
+        }
+        this.syncAgentProviders();
+      },
+
+      getProviderModelValue(provider) {
+        if (!provider) return '';
+        if (this.isCustomGroupFor(provider)) {
+          const providerName = String(provider.customProviderName || '').trim();
+          const modelId = String(provider.customModelId || '').trim();
+          return providerName && modelId ? `${providerName}/${modelId}` : '';
+        }
+        return String(provider.model || '').trim();
+      },
+
+      getProviderDisplayLabel(provider) {
+        const group = this.getGroupByValue(provider.selectedGroup);
+        const base = group ? group.label : (provider.selectedGroup || 'Provider');
+        const model = this.getProviderModelValue(provider);
+        return model ? `${base} (${model})` : base;
+      },
+
+      addAgent() {
+        this.agents.push({
+          id: this.newId('agent'),
+          name: `agent${this.agents.length}`,
+          providerId: '',
+          model: '',
+        });
+      },
+
+      removeAgent(index) {
+        if (this.agents.length <= 1) return;
+        this.agents.splice(index, 1);
+      },
+
+      syncAgentProviders() {
+        const options = this.providerModelOptions;
+        const providerIdSet = new Set(options.map(o => o.id));
+        for (const agent of this.agents) {
+          if (!providerIdSet.has(agent.providerId)) {
+            agent.providerId = '';
+            agent.model = '';
+            continue;
+          }
+          const selected = options.find(o => o.id === agent.providerId);
+          if (selected && agent.model !== selected.model) {
+            agent.model = selected.model;
+          }
+        }
+        if (options.length > 0) {
+          for (const agent of this.agents) {
+            if (!agent.providerId) {
+              agent.providerId = options[0].id;
+              agent.model = options[0].model;
+            }
+          }
+        }
+      },
+
+      onAgentProviderChange(agent) {
+        const selected = this.providerModelOptions.find(o => o.id === agent.providerId);
+        agent.model = selected ? selected.model : '';
       },
 
       nextStep() {
@@ -318,21 +518,46 @@
       },
 
       async runSetup() {
+        for (const p of this.providers) {
+          if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
+            this.log += '\n[ProviderFromEnv] ' + ((this.envProvider && this.envProvider.error) || 'Invalid provider env variables') + '\n';
+            return;
+          }
+        }
+
+        const providerPayload = this.providers.map(p => ({
+          id: p.id,
+          authChoice: p.selectedAuth,
+          authSecret: p.authSecret,
+          model: this.getProviderModelValue(p),
+          customProviderName: p.customProviderName,
+          customBaseUrl: p.customBaseUrl,
+          customApiType: p.customApiType,
+          customModelId: p.customModelId,
+          selectedGroup: p.selectedGroup,
+        }));
+
         const payload = {
-          authChoice: this.selectedAuth,
-          authSecret: this.authSecret,
-          model: this.model,
+          providers: providerPayload,
+          agents: this.agents.map(a => ({
+            name: String(a.name || '').trim(),
+            providerId: a.providerId,
+            model: String(a.model || '').trim(),
+          })),
+          authChoice: providerPayload[0] ? providerPayload[0].authChoice : '',
+          authSecret: providerPayload[0] ? providerPayload[0].authSecret : '',
+          model: providerPayload[0] ? providerPayload[0].model : '',
           telegramToken: this.telegramToken,
           discordToken: this.discordToken,
           slackBotToken: this.slackBotToken,
           slackAppToken: this.slackAppToken
         };
 
-        if (this.isCustomGroup) {
-          payload.customProviderName = this.customProviderName;
-          payload.customBaseUrl = this.customBaseUrl;
-          payload.customApiType = this.customApiType;
-          payload.customModelId = this.customModelId;
+        if (providerPayload[0] && providerPayload[0].authChoice === 'custom-provider') {
+          payload.customProviderName = providerPayload[0].customProviderName;
+          payload.customBaseUrl = providerPayload[0].customBaseUrl;
+          payload.customApiType = providerPayload[0].customApiType;
+          payload.customModelId = providerPayload[0].customModelId;
         }
 
         this.log = 'Running...\n';
@@ -829,71 +1054,161 @@
         </template>
       </div>
 
-      <!-- Step 1: Model & Auth -->
+      <!-- Step 1: Model & Auth (Multi Provider) -->
       <div x-show="step === 1" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-x-4" x-transition:enter-end="opacity-100 translate-x-0">
         <div class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-6 shadow-sm dark:shadow-none">
           <h2 class="text-lg font-semibold mb-1" x-text="t('step1Title')"></h2>
           <p class="text-neutral-500 text-sm mb-6" x-text="t('step1Desc')"></p>
+
           <div class="space-y-5">
-            <div>
-              <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('providerGroup')"></label>
-              <select x-model="selectedGroup" @change="updateAuthChoices()" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
-                <template x-for="g in authGroups" :key="g.value">
-                  <option :value="g.value" x-text="g.label + (g.hint ? ' — ' + g.hint : '')"></option>
-                </template>
-              </select>
-            </div>
-            <div x-show="!isCustomGroup">
-              <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('authMethod')"></label>
-              <select x-model="selectedAuth" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
-                <template x-for="o in authChoices" :key="o.value">
-                  <option :value="o.value" x-text="o.label + (o.hint ? ' — ' + o.hint : '')"></option>
-                </template>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('apiKeyToken')"></label>
-              <input x-model="authSecret" type="password" :placeholder="t('apiKeyPlaceholder')" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
-            </div>
+            <template x-for="(provider, pIndex) in providers" :key="provider.id">
+              <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4 space-y-4">
+                <div class="flex items-center justify-between">
+                  <h4 class="text-sm font-medium" x-text="t('providerConfigTitle') + ' #' + (pIndex + 1)"></h4>
+                  <button
+                    x-show="providers.length > 1"
+                    @click="removeProvider(pIndex)"
+                    type="button"
+                    class="text-xs text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
+                    x-text="t('removeProvider')"></button>
+                </div>
 
-            <!-- Custom provider fields -->
-            <div x-show="isCustomGroup" class="space-y-4 bg-neutral-50 dark:bg-neutral-800/50 rounded-lg p-4 border border-neutral-200 dark:border-neutral-800">
-              <h4 class="text-xs uppercase tracking-wide text-neutral-500 font-medium" x-text="t('customProviderConfig')"></h4>
-              <div x-show="selectedAuth === 'custom-provider'">
-                <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customProviderNameLabel')"></label>
-                <input x-model="customProviderName" type="text" :placeholder="t('customProviderNamePlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
-              </div>
-              <div>
-                <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customBaseUrlLabel')"></label>
-                <input x-model="customBaseUrl" type="text" :placeholder="t('customBaseUrlPlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
-              </div>
-              <div>
-                <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customApiTypeLabel')"></label>
-                <select x-model="customApiType" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
-                  <option value="openai-completions">OpenAI Completions</option>
-                  <option value="anthropic-messages">Anthropic Messages</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customModelIdLabel')"></label>
-                <input x-model="customModelId" type="text" :placeholder="t('customModelIdPlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
-              </div>
-            </div>
+                <div>
+                  <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('providerGroup')"></label>
+                  <select x-model="provider.selectedGroup" @change="updateProviderAuthChoices(provider)" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
+                    <template x-for="g in authGroups" :key="g.value">
+                      <option :value="g.value" x-text="g.label + (g.hint ? ' — ' + g.hint : '')"></option>
+                    </template>
+                  </select>
+                </div>
 
-            <div x-show="!isCustomGroup">
-              <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('modelLabel')"></label>
-              <input x-model="model" type="text" :placeholder="t('modelPlaceholder')" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
-              <p class="text-xs text-neutral-500 dark:text-neutral-600 mt-2" x-text="t('modelHint')"></p>
-            </div>
+                <div x-show="!isCustomGroupFor(provider)">
+                  <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('authMethod')"></label>
+                  <select x-model="provider.selectedAuth" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
+                    <template x-for="o in provider.authChoices" :key="o.value">
+                      <option :value="o.value" x-text="o.label + (o.hint ? ' — ' + o.hint : '')"></option>
+                    </template>
+                  </select>
+                </div>
+
+                <div x-show="!isProviderFromEnvFor(provider)">
+                  <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('apiKeyToken')"></label>
+                  <input x-model="provider.authSecret" type="password" :placeholder="t('apiKeyPlaceholder')" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
+                </div>
+
+                <div x-show="isProviderFromEnvFor(provider)" class="space-y-3 bg-sky-50 dark:bg-sky-900/20 rounded-lg p-4 border border-sky-200 dark:border-sky-800">
+                  <h4 class="text-xs uppercase tracking-wide text-sky-700 dark:text-sky-300 font-medium" x-text="t('providerFromEnvTitle')"></h4>
+                  <p class="text-xs text-sky-700/80 dark:text-sky-300/80" x-text="t('providerFromEnvDesc')"></p>
+                  <div class="grid grid-cols-1 gap-2 text-xs font-mono">
+                    <div class="bg-white dark:bg-neutral-900 border border-sky-200 dark:border-sky-800 rounded px-3 py-2 break-all">
+                      <span class="text-neutral-500" x-text="t('aiProviderVar') + '='"></span>
+                      <span x-text="envProvider.values.aiProvider || '—'"></span>
+                    </div>
+                    <div class="bg-white dark:bg-neutral-900 border border-sky-200 dark:border-sky-800 rounded px-3 py-2 break-all">
+                      <span class="text-neutral-500" x-text="t('providerBaseUrlVar') + '='"></span>
+                      <span x-text="envProvider.values.providerBaseUrl || '—'"></span>
+                    </div>
+                    <div class="bg-white dark:bg-neutral-900 border border-sky-200 dark:border-sky-800 rounded px-3 py-2 break-all">
+                      <span class="text-neutral-500" x-text="t('providerApiKeyVar') + '='"></span>
+                      <span x-text="envProvider.values.providerApiKey || '—'"></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div x-show="isProviderFromEnvFor(provider) && envProvider && !envProvider.valid" class="space-y-2 bg-red-50 dark:bg-red-900/20 rounded-lg p-4 border border-red-200 dark:border-red-800">
+                  <p class="text-sm font-medium text-red-700 dark:text-red-300" x-text="t('envProviderInvalid')"></p>
+                  <p class="text-xs text-red-700/90 dark:text-red-300/90" x-text="envProvider.error || ''"></p>
+                  <p class="text-xs text-red-700/90 dark:text-red-300/90">
+                    <span class="font-medium" x-text="t('envProviderAllowed') + ': '"></span>
+                    <span x-text="(envProvider.allowedProviders || []).join(', ')"></span>
+                  </p>
+                  <p class="text-xs text-red-700/90 dark:text-red-300/90" x-text="t('envProviderFixHint')"></p>
+                </div>
+
+                <div x-show="isCustomGroupFor(provider) && !isProviderFromEnvFor(provider)" class="space-y-4 bg-neutral-50 dark:bg-neutral-800/50 rounded-lg p-4 border border-neutral-200 dark:border-neutral-800">
+                  <h4 class="text-xs uppercase tracking-wide text-neutral-500 font-medium" x-text="t('customProviderConfig')"></h4>
+                  <div x-show="provider.selectedAuth === 'custom-provider'">
+                    <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customProviderNameLabel')"></label>
+                    <input x-model="provider.customProviderName" @input="syncAgentProviders()" type="text" :placeholder="t('customProviderNamePlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
+                  </div>
+                  <div>
+                    <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customBaseUrlLabel')"></label>
+                    <input x-model="provider.customBaseUrl" type="text" :placeholder="t('customBaseUrlPlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
+                  </div>
+                  <div>
+                    <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customApiTypeLabel')"></label>
+                    <select x-model="provider.customApiType" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
+                      <option value="openai-completions">OpenAI Completions</option>
+                      <option value="anthropic-messages">Anthropic Messages</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customModelIdLabel')"></label>
+                    <input x-model="provider.customModelId" @input="syncAgentProviders()" type="text" :placeholder="t('customModelIdPlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
+                  </div>
+                </div>
+
+                <div x-show="!isCustomGroupFor(provider)">
+                  <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('modelLabel')"></label>
+                  <input x-model="provider.model" @input="syncAgentProviders()" type="text" :placeholder="t('modelPlaceholder')" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
+                  <p class="text-xs text-neutral-500 dark:text-neutral-600 mt-2" x-text="t('modelHint')"></p>
+                </div>
+              </div>
+            </template>
+
+            <button @click="addProvider()" type="button" class="w-full bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 px-4 py-2.5 rounded-lg font-medium border border-neutral-300 dark:border-neutral-700 transition-colors" x-text="t('addProvider')"></button>
           </div>
         </div>
       </div>
 
-      <!-- Step 2: Channels -->
+      <!-- Step 2: Agents -->
       <div x-show="step === 2" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-x-4" x-transition:enter-end="opacity-100 translate-x-0">
         <div class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-6 shadow-sm dark:shadow-none">
           <h2 class="text-lg font-semibold mb-1" x-text="t('step2Title')"></h2>
           <p class="text-neutral-500 text-sm mb-6" x-text="t('step2Desc')"></p>
+
+          <div x-show="providerModelOptions.length === 0" class="mb-4 text-sm text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg px-4 py-3" x-text="t('noProviderModel')"></div>
+
+          <div class="space-y-4">
+            <template x-for="(agent, aIndex) in agents" :key="agent.id">
+              <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4 space-y-4">
+                <div class="flex items-center justify-between">
+                  <h4 class="text-sm font-medium" x-text="t('agents') + ' #' + (aIndex + 1)"></h4>
+                  <button x-show="agents.length > 1" @click="removeAgent(aIndex)" type="button" class="text-xs text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300" x-text="t('removeAgent')"></button>
+                </div>
+
+                <div>
+                  <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('agentName')"></label>
+                  <input x-model="agent.name" type="text" :placeholder="t('agentNamePlaceholder')" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
+                </div>
+
+                <div>
+                  <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('agentProvider')"></label>
+                  <select x-model="agent.providerId" @change="onAgentProviderChange(agent)" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
+                    <option value="" x-text="t('selectProvider')"></option>
+                    <template x-for="opt in providerModelOptions" :key="opt.id">
+                      <option :value="opt.id" x-text="opt.label"></option>
+                    </template>
+                  </select>
+                </div>
+
+                <div>
+                  <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('agentModel')"></label>
+                  <input x-model="agent.model" type="text" readonly class="w-full bg-neutral-100 dark:bg-neutral-800/70 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm text-neutral-600 dark:text-neutral-300" />
+                </div>
+              </div>
+            </template>
+
+            <button @click="addAgent()" type="button" class="w-full bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-700 dark:text-neutral-300 px-4 py-2.5 rounded-lg font-medium border border-neutral-300 dark:border-neutral-700 transition-colors" x-text="t('addAgent')"></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3: Channels -->
+      <div x-show="step === 3" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-x-4" x-transition:enter-end="opacity-100 translate-x-0">
+        <div class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-6 shadow-sm dark:shadow-none">
+          <h2 class="text-lg font-semibold mb-1" x-text="t('step3Title')"></h2>
+          <p class="text-neutral-500 text-sm mb-6" x-text="t('step3Desc')"></p>
           <div class="space-y-5">
             <div class="bg-sky-50 dark:bg-neutral-800/50 rounded-lg p-4 border border-sky-200 dark:border-neutral-800">
               <div class="flex items-center gap-3 mb-3">
@@ -931,37 +1246,36 @@
         </div>
       </div>
 
-      <!-- Step 3: Run Setup -->
-      <div x-show="step === 3" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-x-4" x-transition:enter-end="opacity-100 translate-x-0">
+      <!-- Step 4: Run Setup -->
+      <div x-show="step === 4" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-x-4" x-transition:enter-end="opacity-100 translate-x-0">
         <div class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-6 shadow-sm dark:shadow-none">
-          <h2 class="text-lg font-semibold mb-1" x-text="t('step3Title')"></h2>
-          <p class="text-neutral-500 text-sm mb-6" x-text="t('step3Desc')"></p>
+          <h2 class="text-lg font-semibold mb-1" x-text="t('step4Title')"></h2>
+          <p class="text-neutral-500 text-sm mb-6" x-text="t('step4Desc')"></p>
           <div class="bg-neutral-50 dark:bg-neutral-800/50 rounded-lg p-4 border border-neutral-200 dark:border-neutral-800 mb-6">
             <h3 class="text-sm font-medium text-neutral-600 dark:text-neutral-400 mb-3" x-text="t('configSummary')"></h3>
             <dl class="space-y-2 text-sm">
               <div class="flex justify-between">
-                <dt class="text-neutral-500" x-text="t('provider')"></dt>
-                <dd x-text="selectedGroup || '—'" class="text-neutral-700 dark:text-neutral-300"></dd>
+                <dt class="text-neutral-500" x-text="t('providers')"></dt>
+                <dd class="text-neutral-700 dark:text-neutral-300 text-right ml-4">
+                  <template x-for="(p, idx) in providers" :key="p.id">
+                    <div>
+                      <span x-text="(idx + 1) + '. '"></span>
+                      <span x-text="getProviderDisplayLabel(p)"></span>
+                    </div>
+                  </template>
+                </dd>
               </div>
               <div class="flex justify-between">
-                <dt class="text-neutral-500" x-text="t('auth')"></dt>
-                <dd x-text="selectedAuth || '—'" class="text-neutral-700 dark:text-neutral-300"></dd>
-              </div>
-              <div x-show="isCustomGroup" class="flex justify-between">
-                <dt class="text-neutral-500">Base URL</dt>
-                <dd x-text="customBaseUrl || '—'" class="text-neutral-700 dark:text-neutral-300 truncate ml-4 max-w-[200px]"></dd>
-              </div>
-              <div x-show="isCustomGroup" class="flex justify-between">
-                <dt class="text-neutral-500">API Type</dt>
-                <dd x-text="customApiType || '—'" class="text-neutral-700 dark:text-neutral-300"></dd>
-              </div>
-              <div x-show="isCustomGroup" class="flex justify-between">
-                <dt class="text-neutral-500">Model ID</dt>
-                <dd x-text="customModelId || '—'" class="text-neutral-700 dark:text-neutral-300"></dd>
-              </div>
-              <div x-show="!isCustomGroup" class="flex justify-between">
-                <dt class="text-neutral-500" x-text="t('modelLabel')"></dt>
-                <dd x-text="model || t('default')" class="text-neutral-700 dark:text-neutral-300"></dd>
+                <dt class="text-neutral-500" x-text="t('agents')"></dt>
+                <dd class="text-neutral-700 dark:text-neutral-300 text-right ml-4">
+                  <template x-for="a in agents" :key="a.id">
+                    <div>
+                      <span x-text="a.name"></span>
+                      <span class="text-neutral-500"> → </span>
+                      <span x-text="a.model || '—'"></span>
+                    </div>
+                  </template>
+                </dd>
               </div>
               <div class="flex justify-between">
                 <dt class="text-neutral-500" x-text="t('channels')"></dt>
@@ -975,7 +1289,7 @@
             </dl>
           </div>
           <div class="flex flex-wrap gap-3 mb-4">
-            <button @click="runSetup()" :disabled="loading" class="bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-medium transition-colors">
+            <button @click="runSetup()" :disabled="loading || !canRunSetup" class="bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-medium transition-colors">
               <span x-show="!loading" x-text="t('runSetupBtn')"></span>
               <span x-show="loading" class="flex items-center gap-2"><svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg><span x-text="t('running')"></span></span>
             </button>
