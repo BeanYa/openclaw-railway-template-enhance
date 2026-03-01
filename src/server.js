@@ -654,10 +654,6 @@ function isCustomProvider(authChoice) {
   return CUSTOM_PROVIDER_CHOICES.includes(authChoice);
 }
 
-function keyPath(prefix, key) {
-  return `${prefix}[${JSON.stringify(String(key))}]`;
-}
-
 async function configureCustomProvider(payload) {
   const providerName =
     payload.authChoice === "custom-provider"
@@ -688,7 +684,7 @@ async function configureCustomProvider(payload) {
       "config",
       "set",
       "--json",
-      keyPath("models.providers", providerName),
+      `models.providers.${providerName}`,
       JSON.stringify(providerCfg),
     ]),
   );
@@ -708,7 +704,7 @@ async function configureCustomProvider(payload) {
         "config",
         "set",
         "--json",
-        keyPath("auth.profiles", profileId),
+        `auth.profiles.${profileId}`,
         JSON.stringify(authProfile),
       ]),
     );
@@ -722,7 +718,7 @@ async function configureCustomProvider(payload) {
         "config",
         "set",
         "--json",
-        keyPath("auth.order", providerName),
+        `auth.order.${providerName}`,
         JSON.stringify([profileId]),
       ]),
     );
@@ -734,7 +730,7 @@ async function configureCustomProvider(payload) {
 
   const unsetOpenAIProfile = await runCmd(
     OPENCLAW_NODE,
-    clawArgs(["config", "unset", keyPath("auth.profiles", "openai:default")]),
+    clawArgs(["config", "unset", "auth.profiles.openai:default"]),
   );
   extra += `[custom-provider] unset auth.profiles.openai:default exit=${unsetOpenAIProfile.code}\n`;
   if (unsetOpenAIProfile.output) extra += unsetOpenAIProfile.output;
@@ -774,6 +770,13 @@ function validatePayload(payload) {
     if (payload[field] !== undefined && typeof payload[field] !== "string") {
       return `Invalid ${field}: must be a string`;
     }
+  }
+  if (
+    payload.authChoice === "custom-provider" &&
+    payload.customProviderName &&
+    !/^[A-Za-z0-9_-]+$/.test(payload.customProviderName)
+  ) {
+    return "Invalid customProviderName: only letters, numbers, underscore, and hyphen are allowed";
   }
   if (payload.customApiType) {
     const validApiTypes = [
