@@ -83,6 +83,8 @@ const TUI_MAX_SESSION_MS = Number.parseInt(
   process.env.TUI_MAX_SESSION_MS ?? "1800000",
   10,
 );
+const CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY =
+  "sk-placeholder-for-custom-provider";
 
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
@@ -565,7 +567,7 @@ function buildOnboardArgs(payload) {
         "--auth-choice",
         "openai-api-key",
         "--openai-api-key",
-        "sk-placeholder-for-custom-provider",
+        CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY,
       );
     } else {
       args.push("--auth-choice", payload.authChoice);
@@ -654,6 +656,141 @@ function isCustomProvider(authChoice) {
   return CUSTOM_PROVIDER_CHOICES.includes(authChoice);
 }
 
+function listAuthProfileStorePaths() {
+  const files = [];
+  const legacy = path.join(STATE_DIR, "agent", "auth-profiles.json");
+  if (fs.existsSync(legacy)) files.push(legacy);
+
+  const agentsRoot = path.join(STATE_DIR, "agents");
+  if (fs.existsSync(agentsRoot)) {
+    for (const entry of fs.readdirSync(agentsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const p = path.join(agentsRoot, entry.name, "agent", "auth-profiles.json");
+      if (fs.existsSync(p)) files.push(p);
+    }
+  }
+
+  if (files.length === 0) {
+    files.push(path.join(STATE_DIR, "agents", "main", "agent", "auth-profiles.json"));
+  }
+
+  return [...new Set(files)];
+}
+
+function sanitizeBootstrapOpenAIEnvFile() {
+  const envPath = path.join(STATE_DIR, ".env");
+  if (!fs.existsSync(envPath)) return { changed: false, removed: 0 };
+
+  const original = fs.readFileSync(envPath, "utf8");
+  const lines = original.split(/\r?\n/);
+  let removed = 0;
+  const kept = [];
+
+  for (const line of lines) {
+    if (
+      /^\s*OPENAI_API_KEY\s*=/.test(line) &&
+      line.includes(CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY)
+    ) {
+      removed += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+
+  if (!removed) return { changed: false, removed: 0 };
+
+  fs.writeFileSync(envPath, `${kept.join("\n").replace(/\n+$/, "")}\n`, "utf8");
+  return { changed: true, removed };
+}
+
+function syncAuthProfileStores({ providerName, profileId, apiKey }) {
+  const storePaths = listAuthProfileStorePaths();
+  let changedFiles = 0;
+  let parseErrors = 0;
+  let removedProfiles = 0;
+
+  for (const storePath of storePaths) {
+    try {
+      let store = {};
+      if (fs.existsSync(storePath)) {
+        const raw = fs.readFileSync(storePath, "utf8");
+        store = raw.trim() ? JSON.parse(raw) : {};
+      }
+
+      if (!store || typeof store !== "object" || Array.isArray(store)) store = {};
+      if (
+        !store.profiles ||
+        typeof store.profiles !== "object" ||
+        Array.isArray(store.profiles)
+      ) {
+        store.profiles = {};
+      }
+
+      let changed = false;
+      for (const [id, profile] of Object.entries(store.profiles)) {
+        const p = profile || {};
+        const pKey = typeof p.key === "string" ? p.key : "";
+        const isPlaceholder =
+          pKey.includes(CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY) ||
+          pKey.includes("placeholder-for-custom-provider");
+        if (id === "openai:default" || isPlaceholder) {
+          delete store.profiles[id];
+          removedProfiles += 1;
+          changed = true;
+        }
+      }
+
+      if (apiKey) {
+        store.profiles[profileId] = {
+          type: "api_key",
+          provider: providerName,
+          key: apiKey,
+        };
+        changed = true;
+      }
+
+      if (
+        store.usageStats &&
+        typeof store.usageStats === "object" &&
+        !Array.isArray(store.usageStats)
+      ) {
+        for (const usageId of Object.keys(store.usageStats)) {
+          if (!store.profiles[usageId]) {
+            delete store.usageStats[usageId];
+            changed = true;
+          }
+        }
+      }
+
+      if (!changed && fs.existsSync(storePath)) continue;
+
+      fs.mkdirSync(path.dirname(storePath), { recursive: true });
+      fs.writeFileSync(storePath, `${JSON.stringify(store, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      changedFiles += 1;
+
+      const authCachePath = path.join(path.dirname(storePath), "auth.json");
+      if (fs.existsSync(authCachePath)) {
+        try {
+          fs.rmSync(authCachePath, { force: true });
+        } catch {}
+      }
+    } catch {
+      parseErrors += 1;
+    }
+  }
+
+  return {
+    ok: parseErrors === 0,
+    changedFiles,
+    parseErrors,
+    removedProfiles,
+    inspectedFiles: storePaths.length,
+  };
+}
+
 async function configureCustomProvider(payload) {
   const providerName =
     payload.authChoice === "custom-provider"
@@ -728,12 +865,36 @@ async function configureCustomProvider(payload) {
 
   }
 
+  const syncAuthStoresResult = syncAuthProfileStores({
+    providerName,
+    profileId,
+    apiKey,
+  });
+  extra +=
+    `[custom-provider] sync auth-profiles changed=${syncAuthStoresResult.changedFiles} ` +
+    `removed=${syncAuthStoresResult.removedProfiles} ` +
+    `files=${syncAuthStoresResult.inspectedFiles} ` +
+    `parseErrors=${syncAuthStoresResult.parseErrors}\n`;
+  if (!syncAuthStoresResult.ok) ok = false;
+
+  const cleanBootstrapEnvResult = sanitizeBootstrapOpenAIEnvFile();
+  extra +=
+    `[custom-provider] sanitize ${path.join(STATE_DIR, ".env")} ` +
+    `changed=${cleanBootstrapEnvResult.changed} removed=${cleanBootstrapEnvResult.removed}\n`;
+
   const unsetOpenAIProfile = await runCmd(
     OPENCLAW_NODE,
     clawArgs(["config", "unset", "auth.profiles.openai:default"]),
   );
   extra += `[custom-provider] unset auth.profiles.openai:default exit=${unsetOpenAIProfile.code}\n`;
   if (unsetOpenAIProfile.output) extra += unsetOpenAIProfile.output;
+
+  const unsetOpenAIOrder = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["config", "unset", "auth.order.openai"]),
+  );
+  extra += `[custom-provider] unset auth.order.openai exit=${unsetOpenAIOrder.code}\n`;
+  if (unsetOpenAIOrder.output) extra += unsetOpenAIOrder.output;
 
   // Set model
   if (modelId) {
