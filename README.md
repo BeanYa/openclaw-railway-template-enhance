@@ -30,6 +30,53 @@
 - During setup, the wrapper runs `openclaw onboard --non-interactive ...` inside the container, writes state to the volume, and then starts the gateway.
 - After setup, **`/` is OpenClaw**. The wrapper reverse-proxies all traffic (including WebSockets) to the local gateway process.
 
+## ProviderFromEnv (Railway Variables)
+
+If you set `AI_PROVIDER` (non-empty), the setup page will default to **ProviderFromEnv** and read provider config from Railway **Variables**.
+
+### Variables
+
+Set all 3 together:
+
+- `AI_PROVIDER`
+- `PROVIDER_BASE_URL`
+- `PROVIDER_API_KEY`
+
+### `AI_PROVIDER` allowed values
+
+- `openai`
+- `anthropic`
+- `google`
+- `openrouter`
+- `ai-gateway`
+- `moonshot`
+- `zai`
+- `minimax`
+- `synthetic`
+- `opencode-zen`
+- `volcengine-plan`
+- `bedrock`
+- `bailian`
+- `ollama`
+- `custom-provider` (custom OpenAI-compatible API, aligned with Setup "Custom Provider")
+
+### Validation behavior in `/setup`
+
+- On setup page load, the wrapper validates `AI_PROVIDER` / `PROVIDER_BASE_URL` / `PROVIDER_API_KEY`.
+- If valid, the setup page shows these values under ProviderFromEnv and can generate a valid OpenClaw config.
+- If invalid (for example, wrong `AI_PROVIDER`), setup page displays:
+  - the exact validation error,
+  - all allowed `AI_PROVIDER` values,
+  - a hint to fix Railway **Variables** and redeploy/restart if needed.
+
+### Example (Railway Variables)
+
+```env
+AI_PROVIDER=openai
+PROVIDER_BASE_URL=https://api.openai.com/v1
+PROVIDER_API_KEY=sk-xxxx
+```
+
 ## Getting chat tokens (so you don't have to scramble)
 
 ### Telegram bot token
