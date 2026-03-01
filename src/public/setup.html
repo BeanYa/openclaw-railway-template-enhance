@@ -172,10 +172,12 @@
           providerFromEnvDesc: 'Using Railway Variables (read-only in setup):',
           aiProviderVar: 'AI_PROVIDER',
           providerBaseUrlVar: 'PROVIDER_BASE_URL',
+          effectiveBaseUrl: 'Effective Base URL',
           providerApiKeyVar: 'PROVIDER_API_KEY',
           envProviderInvalid: 'Environment variable validation failed',
           envProviderAllowed: 'Allowed AI_PROVIDER values',
           envProviderFixHint: 'Please update Railway Variables and redeploy/restart if needed.',
+          providerBaseUrlIgnored: 'PROVIDER_BASE_URL is ignored for non-CUSTOM_PROVIDER values.',
           providerRequiredNext: 'Configure at least one provider (with model) before continuing.',
           previewBtn: 'Preview File Changes',
           previewTitle: 'Planned File Changes',
@@ -304,10 +306,12 @@
           providerFromEnvDesc: '当前使用 Railway Variables（在 setup 中只读显示）：',
           aiProviderVar: 'AI_PROVIDER',
           providerBaseUrlVar: 'PROVIDER_BASE_URL',
+          effectiveBaseUrl: '生效 Base URL',
           providerApiKeyVar: 'PROVIDER_API_KEY',
           envProviderInvalid: '环境变量校验失败',
           envProviderAllowed: 'AI_PROVIDER 可选值',
           envProviderFixHint: '请在 Railway 的 Variables 中修正后，必要时重新部署/重启。',
+          providerBaseUrlIgnored: '当 AI_PROVIDER 不是 CUSTOM_PROVIDER 时，PROVIDER_BASE_URL 会被忽略。',
           providerRequiredNext: '继续前请至少配置一个 Provider（含模型）。',
           previewBtn: '预览文件改动',
           previewTitle: '即将发生的文件改动',
@@ -453,6 +457,28 @@
         return provider.selectedGroup === 'provider-from-env' || provider.selectedAuth === 'provider-from-env';
       },
 
+      isEditableCustomProvider(provider) {
+        return String(provider?.selectedAuth || '').trim() === 'custom-provider';
+      },
+
+      getProviderGroupBaseUrl(provider) {
+        const group = this.getGroupByValue(provider?.selectedGroup);
+        return String((group && group.baseUrl) || '').trim();
+      },
+
+      getProviderBaseUrl(provider) {
+        if (!provider) return '';
+        if (this.isProviderFromEnvFor(provider)) {
+          return String(this.envProvider?.values?.effectiveProviderBaseUrl || '').trim();
+        }
+        if (this.isEditableCustomProvider(provider)) {
+          return String(provider.customBaseUrl || '').trim();
+        }
+        const groupBaseUrl = this.getProviderGroupBaseUrl(provider);
+        if (groupBaseUrl) return groupBaseUrl;
+        return String(provider.customBaseUrl || '').trim();
+      },
+
       createProviderConfig() {
         const preferredGroup = this.envProvider.enabled ? 'provider-from-env' : (this.authGroups[0] && this.authGroups[0].value) || '';
         const provider = {
@@ -491,8 +517,8 @@
         }
         if (this.isProviderFromEnvFor(provider) && this.envProvider && this.envProvider.values) {
           provider.authSecret = this.envProvider.values.providerApiKey || '';
-          provider.customProviderName = this.envProvider.values.aiProvider || provider.customProviderName;
-          provider.customBaseUrl = this.envProvider.values.providerBaseUrl || provider.customBaseUrl;
+          provider.customProviderName = this.envProvider.values.providerName || provider.customProviderName;
+          provider.customBaseUrl = this.envProvider.values.effectiveProviderBaseUrl || provider.customBaseUrl;
         }
         this.markProviderValidationDirty(provider);
         this.syncAgentProviders();
@@ -1531,10 +1557,15 @@
                       <span x-text="envProvider.values.providerBaseUrl || '—'"></span>
                     </div>
                     <div class="bg-white dark:bg-neutral-900 border border-sky-200 dark:border-sky-800 rounded px-3 py-2 break-all">
+                      <span class="text-neutral-500" x-text="t('effectiveBaseUrl') + '='"></span>
+                      <span x-text="envProvider.values.effectiveProviderBaseUrl || '—'"></span>
+                    </div>
+                    <div class="bg-white dark:bg-neutral-900 border border-sky-200 dark:border-sky-800 rounded px-3 py-2 break-all">
                       <span class="text-neutral-500" x-text="t('providerApiKeyVar') + '='"></span>
                       <span x-text="envProvider.values.providerApiKey || '—'"></span>
                     </div>
                   </div>
+                  <p x-show="envProvider.values.baseUrlIgnored" class="text-xs text-sky-700/80 dark:text-sky-300/80" x-text="t('providerBaseUrlIgnored')"></p>
                 </div>
 
                 <div x-show="isProviderFromEnvFor(provider) && envProvider && !envProvider.valid" class="space-y-2 bg-red-50 dark:bg-red-900/20 rounded-lg p-4 border border-red-200 dark:border-red-800">
@@ -1549,15 +1580,21 @@
 
                 <div x-show="isCustomGroupFor(provider) && !isProviderFromEnvFor(provider)" class="space-y-4 bg-neutral-50 dark:bg-neutral-800/50 rounded-lg p-4 border border-neutral-200 dark:border-neutral-800">
                   <h4 class="text-xs uppercase tracking-wide text-neutral-500 font-medium" x-text="t('customProviderConfig')"></h4>
-                  <div x-show="provider.selectedAuth === 'custom-provider'">
+                  <div x-show="isEditableCustomProvider(provider)">
                     <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customProviderNameLabel')"></label>
                     <input x-model="provider.customProviderName" @input="syncAgentProviders()" type="text" :placeholder="t('customProviderNamePlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
                   </div>
                   <div>
                     <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customBaseUrlLabel')"></label>
-                    <input x-model="provider.customBaseUrl" type="text" :placeholder="t('customBaseUrlPlaceholder')" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
+                    <input
+                      x-model="provider.customBaseUrl"
+                      type="text"
+                      :readonly="!isEditableCustomProvider(provider)"
+                      :placeholder="isEditableCustomProvider(provider) ? t('customBaseUrlPlaceholder') : ''"
+                      class="w-full border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none transition-colors"
+                      :class="isEditableCustomProvider(provider) ? 'bg-white dark:bg-neutral-900 placeholder-neutral-400 dark:placeholder-neutral-600 focus:border-red-500' : 'bg-neutral-100 dark:bg-neutral-900/60 text-neutral-600 dark:text-neutral-300 cursor-not-allowed'" />
                   </div>
-                  <div>
+                  <div x-show="isEditableCustomProvider(provider)">
                     <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customApiTypeLabel')"></label>
                     <select x-model="provider.customApiType" class="w-full bg-white dark:bg-neutral-900 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-red-500 transition-colors">
                       <option value="openai-completions">OpenAI Completions</option>
@@ -1571,6 +1608,13 @@
                 </div>
 
                 <div x-show="!isCustomGroupFor(provider)">
+                  <label x-show="getProviderBaseUrl(provider)" class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('customBaseUrlLabel')"></label>
+                  <input
+                    x-show="getProviderBaseUrl(provider)"
+                    :value="getProviderBaseUrl(provider)"
+                    type="text"
+                    readonly
+                    class="w-full mb-4 bg-neutral-100 dark:bg-neutral-900/60 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm text-neutral-600 dark:text-neutral-300 cursor-not-allowed" />
                   <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('modelLabel')"></label>
                   <input x-model="provider.model" @input="syncAgentProviders()" type="text" :placeholder="t('modelPlaceholder')" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
                   <p class="text-xs text-neutral-500 dark:text-neutral-600 mt-2" x-text="t('modelHint')"></p>

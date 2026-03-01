@@ -36,33 +36,36 @@ If you set `AI_PROVIDER` (non-empty), the setup page will default to **ProviderF
 
 ### Variables
 
-Set all 3 together:
+Set required variables based on `AI_PROVIDER`:
 
 - `AI_PROVIDER`
-- `PROVIDER_BASE_URL`
 - `PROVIDER_API_KEY`
+- `PROVIDER_BASE_URL` (required only when `AI_PROVIDER=CUSTOM_PROVIDER`; ignored otherwise)
+
+`AI_PROVIDER` must use uppercase values.
 
 ### `AI_PROVIDER` allowed values
 
-- `openai`
-- `anthropic`
-- `google`
-- `openrouter`
-- `ai-gateway`
-- `moonshot`
-- `zai`
-- `minimax`
-- `synthetic`
-- `opencode-zen`
-- `volcengine-plan`
-- `bedrock`
-- `bailian`
-- `ollama`
-- `custom-provider` (custom OpenAI-compatible API, aligned with Setup "Custom Provider")
+- `OPENAI`
+- `ANTHROPIC`
+- `GOOGLE`
+- `OPENROUTER`
+- `AI_GATEWAY`
+- `MOONSHOT` (国内厂商：Moonshot/Kimi)
+- `ZAI` (国内厂商：智谱 Z.AI)
+- `MINIMAX` (国内厂商：MiniMax)
+- `SYNTHETIC`
+- `OPENCODE_ZEN`
+- `VOLCENGINE_PLAN` (国内厂商：火山引擎 Coding Plan)
+- `BEDROCK`
+- `BAILIAN` (国内厂商：阿里百炼)
+- `OLLAMA`
+- `CUSTOM_PROVIDER` (custom OpenAI-compatible API, aligned with Setup "Custom Provider")
 
 ### Validation behavior in `/setup`
 
-- On setup page load, the wrapper validates `AI_PROVIDER` / `PROVIDER_BASE_URL` / `PROVIDER_API_KEY`.
+- On setup page load, the wrapper validates `AI_PROVIDER` / `PROVIDER_API_KEY` (and validates `PROVIDER_BASE_URL` only when `AI_PROVIDER=CUSTOM_PROVIDER`).
+- For non-`CUSTOM_PROVIDER` values, `PROVIDER_BASE_URL` is ignored and OpenClaw built-in provider base URLs are used.
 - If valid, the setup page shows these values under ProviderFromEnv and can generate a valid OpenClaw config.
 - If invalid (for example, wrong `AI_PROVIDER`), setup page displays:
   - the exact validation error,
@@ -72,8 +75,15 @@ Set all 3 together:
 ### Example (Railway Variables)
 
 ```env
-AI_PROVIDER=openai
-PROVIDER_BASE_URL=https://api.openai.com/v1
+AI_PROVIDER=OPENAI
+PROVIDER_API_KEY=sk-xxxx
+```
+
+For custom OpenAI-compatible providers:
+
+```env
+AI_PROVIDER=CUSTOM_PROVIDER
+PROVIDER_BASE_URL=https://api.example.com/v1
 PROVIDER_API_KEY=sk-xxxx
 ```
 

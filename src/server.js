@@ -86,27 +86,147 @@ const TUI_MAX_SESSION_MS = Number.parseInt(
 const CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY =
   "sk-placeholder-for-custom-provider";
 
-const AI_PROVIDER = process.env.AI_PROVIDER?.trim() || "";
+const DEFAULT_PROVIDER_BASE_URLS = Object.freeze({
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta",
+  openrouter: "https://openrouter.ai/api/v1",
+  "ai-gateway": "https://gateway.ai.vercel.com/v1",
+  moonshot: "https://api.moonshot.cn/v1",
+  zai: "https://open.bigmodel.cn/api/paas/v4",
+  minimax: "https://api.minimax.chat/v1",
+  "volcengine-plan": "https://ark.cn-beijing.volces.com/api/coding/v3",
+  bedrock: "https://bedrock-runtime.us-east-1.amazonaws.com",
+  bailian: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  ollama: "http://localhost:11434/v1",
+});
+
+const ENV_PROVIDER_DEFINITIONS = Object.freeze({
+  OPENAI: {
+    providerName: "openai",
+    selectedGroup: "openai",
+    authChoice: "openai-api-key",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  ANTHROPIC: {
+    providerName: "anthropic",
+    selectedGroup: "anthropic",
+    authChoice: "apiKey",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  GOOGLE: {
+    providerName: "google",
+    selectedGroup: "google",
+    authChoice: "gemini-api-key",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  OPENROUTER: {
+    providerName: "openrouter",
+    selectedGroup: "openrouter",
+    authChoice: "openrouter-api-key",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  AI_GATEWAY: {
+    providerName: "ai-gateway",
+    selectedGroup: "ai-gateway",
+    authChoice: "ai-gateway-api-key",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  MOONSHOT: {
+    providerName: "moonshot",
+    selectedGroup: "moonshot",
+    authChoice: "moonshot-api-key",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  ZAI: {
+    providerName: "zai",
+    selectedGroup: "zai",
+    authChoice: "zai-api-key",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  MINIMAX: {
+    providerName: "minimax",
+    selectedGroup: "minimax",
+    authChoice: "minimax-api",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  SYNTHETIC: {
+    providerName: "synthetic",
+    selectedGroup: "synthetic",
+    authChoice: "synthetic-api-key",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  OPENCODE_ZEN: {
+    providerName: "opencode-zen",
+    selectedGroup: "opencode-zen",
+    authChoice: "opencode-zen",
+    customChoice: false,
+    requiresCustomBaseUrl: false,
+  },
+  VOLCENGINE_PLAN: {
+    providerName: "volcengine-plan",
+    selectedGroup: "volcengine-plan",
+    authChoice: "volcengine-plan",
+    customChoice: true,
+    requiresCustomBaseUrl: false,
+    customApiType: "openai-completions",
+  },
+  BEDROCK: {
+    providerName: "bedrock",
+    selectedGroup: "bedrock",
+    authChoice: "bedrock",
+    customChoice: true,
+    requiresCustomBaseUrl: false,
+    customApiType: "anthropic-messages",
+  },
+  BAILIAN: {
+    providerName: "bailian",
+    selectedGroup: "bailian",
+    authChoice: "bailian",
+    customChoice: true,
+    requiresCustomBaseUrl: false,
+    customApiType: "openai-completions",
+  },
+  OLLAMA: {
+    providerName: "ollama",
+    selectedGroup: "ollama",
+    authChoice: "ollama",
+    customChoice: true,
+    requiresCustomBaseUrl: false,
+    customApiType: "openai-completions",
+  },
+  CUSTOM_PROVIDER: {
+    providerName: "custom-provider",
+    selectedGroup: "custom-provider",
+    authChoice: "custom-provider",
+    customChoice: true,
+    requiresCustomBaseUrl: true,
+    customApiType: "openai-completions",
+  },
+});
+
+const VALID_ENV_AI_PROVIDERS = Object.freeze(
+  Object.keys(ENV_PROVIDER_DEFINITIONS),
+);
+
+const AI_PROVIDER_RAW = process.env.AI_PROVIDER?.trim() || "";
+const AI_PROVIDER = AI_PROVIDER_RAW.toUpperCase();
 const PROVIDER_BASE_URL = process.env.PROVIDER_BASE_URL?.trim() || "";
 const PROVIDER_API_KEY = process.env.PROVIDER_API_KEY?.trim() || "";
 
-const VALID_ENV_AI_PROVIDERS = [
-  "openai",
-  "anthropic",
-  "google",
-  "openrouter",
-  "ai-gateway",
-  "moonshot",
-  "zai",
-  "minimax",
-  "synthetic",
-  "opencode-zen",
-  "volcengine-plan",
-  "bedrock",
-  "bailian",
-  "ollama",
-  "custom-provider",
-];
+function resolveEnvProviderDefinition(value) {
+  const key = String(value || "").trim().toUpperCase();
+  return ENV_PROVIDER_DEFINITIONS[key] || null;
+}
 
 function clawArgs(args) {
   return [OPENCLAW_ENTRY, ...args];
@@ -133,11 +253,46 @@ function inferCustomApiTypeByProvider(providerName) {
   return "openai-completions";
 }
 
+function normalizeEnvModel(rawModel, providerName) {
+  const source = String(rawModel || "").trim();
+  if (!source) return { model: "", modelId: "" };
+
+  if (!source.includes("/")) {
+    return {
+      model: `${providerName}/${source}`,
+      modelId: source,
+    };
+  }
+
+  const parts = source.split("/");
+  const modelId = parts.slice(1).join("/").trim();
+  if (!modelId) return { model: "", modelId: "" };
+
+  return {
+    model: `${providerName}/${modelId}`,
+    modelId,
+  };
+}
+
 function validateEnvProviderConfig() {
-  const enabled = Boolean(AI_PROVIDER);
+  const enabled = Boolean(AI_PROVIDER_RAW);
+  const providerDef = resolveEnvProviderDefinition(AI_PROVIDER);
+  const requiresCustomBaseUrl = Boolean(providerDef?.requiresCustomBaseUrl);
+  const builtinBaseUrl = providerDef
+    ? DEFAULT_PROVIDER_BASE_URLS[providerDef.providerName] || ""
+    : "";
+  const effectiveProviderBaseUrl = requiresCustomBaseUrl
+    ? PROVIDER_BASE_URL
+    : builtinBaseUrl;
   const values = {
-    aiProvider: AI_PROVIDER,
+    aiProvider: AI_PROVIDER_RAW,
+    aiProviderNormalized: AI_PROVIDER,
+    providerName: providerDef?.providerName || "",
     providerBaseUrl: PROVIDER_BASE_URL,
+    effectiveProviderBaseUrl,
+    baseUrlIgnored: Boolean(
+      providerDef && !requiresCustomBaseUrl && PROVIDER_BASE_URL,
+    ),
     providerApiKey: PROVIDER_API_KEY,
   };
 
@@ -147,51 +302,70 @@ function validateEnvProviderConfig() {
       valid: false,
       values,
       allowedProviders: VALID_ENV_AI_PROVIDERS,
+      providerMeta: null,
       error: null,
     };
   }
 
-  if (!VALID_ENV_AI_PROVIDERS.includes(AI_PROVIDER)) {
+  if (AI_PROVIDER_RAW !== AI_PROVIDER) {
     return {
       enabled: true,
       valid: false,
       values,
       allowedProviders: VALID_ENV_AI_PROVIDERS,
+      providerMeta: null,
       error:
-        `Invalid AI_PROVIDER: ${AI_PROVIDER}. ` +
+        `Invalid AI_PROVIDER: ${AI_PROVIDER_RAW}. ` +
+        "AI_PROVIDER must be uppercase (for example: OPENAI, ANTHROPIC, CUSTOM_PROVIDER).",
+    };
+  }
+
+  if (!providerDef) {
+    return {
+      enabled: true,
+      valid: false,
+      values,
+      allowedProviders: VALID_ENV_AI_PROVIDERS,
+      providerMeta: null,
+      error:
+        `Invalid AI_PROVIDER: ${AI_PROVIDER_RAW}. ` +
         `Allowed values: ${VALID_ENV_AI_PROVIDERS.join(", ")}. ` +
         "Please update Railway Variables (AI_PROVIDER / PROVIDER_BASE_URL / PROVIDER_API_KEY).",
     };
   }
 
-  if (!PROVIDER_BASE_URL) {
-    return {
-      enabled: true,
-      valid: false,
-      values,
-      allowedProviders: VALID_ENV_AI_PROVIDERS,
-      error:
-        "PROVIDER_BASE_URL is required when AI_PROVIDER is set. " +
-        "Please update Railway Variables.",
-    };
-  }
-
-  try {
-    const u = new URL(PROVIDER_BASE_URL);
-    if (u.protocol !== "http:" && u.protocol !== "https:") {
-      throw new Error("invalid-protocol");
+  if (requiresCustomBaseUrl) {
+    if (!PROVIDER_BASE_URL) {
+      return {
+        enabled: true,
+        valid: false,
+        values,
+        allowedProviders: VALID_ENV_AI_PROVIDERS,
+        providerMeta: null,
+        error:
+          "PROVIDER_BASE_URL is required when AI_PROVIDER=CUSTOM_PROVIDER. " +
+          "Please update Railway Variables.",
+      };
     }
-  } catch {
-    return {
-      enabled: true,
-      valid: false,
-      values,
-      allowedProviders: VALID_ENV_AI_PROVIDERS,
-      error:
-        `Invalid PROVIDER_BASE_URL: ${PROVIDER_BASE_URL}. ` +
-        "Expected an absolute URL starting with http:// or https://. " +
-        "Please update Railway Variables.",
-    };
+
+    try {
+      const u = new URL(PROVIDER_BASE_URL);
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        throw new Error("invalid-protocol");
+      }
+    } catch {
+      return {
+        enabled: true,
+        valid: false,
+        values,
+        allowedProviders: VALID_ENV_AI_PROVIDERS,
+        providerMeta: null,
+        error:
+          `Invalid PROVIDER_BASE_URL: ${PROVIDER_BASE_URL}. ` +
+          "Expected an absolute URL starting with http:// or https://. " +
+          "Please update Railway Variables.",
+      };
+    }
   }
 
   if (!PROVIDER_API_KEY) {
@@ -200,6 +374,7 @@ function validateEnvProviderConfig() {
       valid: false,
       values,
       allowedProviders: VALID_ENV_AI_PROVIDERS,
+      providerMeta: null,
       error:
         "PROVIDER_API_KEY is required when AI_PROVIDER is set. " +
         "Please update Railway Variables.",
@@ -211,6 +386,18 @@ function validateEnvProviderConfig() {
     valid: true,
     values,
     allowedProviders: VALID_ENV_AI_PROVIDERS,
+    providerMeta: {
+      key: AI_PROVIDER,
+      providerName: providerDef.providerName,
+      selectedGroup: providerDef.selectedGroup,
+      authChoice: providerDef.authChoice,
+      customChoice: Boolean(providerDef.customChoice),
+      requiresCustomBaseUrl,
+      customApiType:
+        providerDef.customApiType ||
+        inferCustomApiTypeByProvider(providerDef.providerName),
+      effectiveProviderBaseUrl,
+    },
     error: null,
   };
 }
@@ -232,25 +419,39 @@ function buildPayloadFromEnvProvider(rawPayload = {}) {
     };
   }
 
-  const rawModel = typeof rawPayload.model === "string" ? rawPayload.model.trim() : "";
-  let customModelId = "";
-  if (rawModel) {
-    const prefixed = `${AI_PROVIDER}/`;
-    customModelId = rawModel.startsWith(prefixed) ? rawModel.slice(prefixed.length) : rawModel;
+  const meta = envValidation.providerMeta;
+  if (!meta) {
+    return {
+      ok: false,
+      error: "Failed to resolve AI_PROVIDER metadata from environment variables.",
+    };
   }
 
-  return {
-    ok: true,
-    payload: {
-      ...rawPayload,
-      authChoice: "custom-provider",
-      authSecret: PROVIDER_API_KEY,
-      customProviderName: AI_PROVIDER,
-      customBaseUrl: PROVIDER_BASE_URL,
-      customApiType: inferCustomApiTypeByProvider(AI_PROVIDER),
-      customModelId,
-    },
+  const rawModel = typeof rawPayload.model === "string" ? rawPayload.model.trim() : "";
+  const normalizedModel = normalizeEnvModel(rawModel, meta.providerName);
+
+  const payload = {
+    ...rawPayload,
+    selectedGroup: meta.selectedGroup,
+    authChoice: meta.authChoice,
+    authSecret: PROVIDER_API_KEY,
+    model: normalizedModel.model,
   };
+
+  if (meta.customChoice) {
+    return {
+      ok: true,
+      payload: {
+        ...payload,
+        customProviderName: meta.providerName,
+        customBaseUrl: meta.effectiveProviderBaseUrl || "",
+        customApiType: meta.customApiType,
+        customModelId: normalizedModel.modelId,
+      },
+    };
+  }
+
+  return { ok: true, payload };
 }
 
 let gatewayProc = null;
@@ -510,6 +711,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "openai",
       label: "OpenAI",
       hint: "API key",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.openai,
       options: [
         { value: "openai-api-key", label: "OpenAI API key" },
       ],
@@ -518,6 +720,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "anthropic",
       label: "Anthropic",
       hint: "API key",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.anthropic,
       options: [
         { value: "apiKey", label: "Anthropic API key" },
       ],
@@ -526,6 +729,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "google",
       label: "Google",
       hint: "API key",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.google,
       options: [
         { value: "gemini-api-key", label: "Google Gemini API key" },
       ],
@@ -534,12 +738,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "openrouter",
       label: "OpenRouter",
       hint: "API key",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.openrouter,
       options: [{ value: "openrouter-api-key", label: "OpenRouter API key" }],
     },
     {
       value: "ai-gateway",
       label: "Vercel AI Gateway",
       hint: "API key",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS["ai-gateway"],
       options: [
         { value: "ai-gateway-api-key", label: "Vercel AI Gateway API key" },
       ],
@@ -548,6 +754,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "moonshot",
       label: "Moonshot AI",
       hint: "Kimi K2 + Kimi Code",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.moonshot,
       options: [
         { value: "moonshot-api-key", label: "Moonshot AI API key" },
         { value: "kimi-code-api-key", label: "Kimi Code API key" },
@@ -557,12 +764,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "zai",
       label: "Z.AI (GLM 4.7)",
       hint: "API key",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.zai,
       options: [{ value: "zai-api-key", label: "Z.AI (GLM 4.7) API key" }],
     },
     {
       value: "minimax",
       label: "MiniMax",
       hint: "M2.1 (recommended)",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.minimax,
       options: [
         { value: "minimax-api", label: "MiniMax M2.1" },
         { value: "minimax-api-lightning", label: "MiniMax M2.1 Lightning" },
@@ -572,12 +781,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "qwen",
       label: "Qwen",
       hint: "OAuth",
+      baseUrl: "",
       options: [{ value: "qwen-portal", label: "Qwen OAuth" }],
     },
     {
       value: "copilot",
       label: "Copilot",
       hint: "GitHub + local proxy",
+      baseUrl: "",
       options: [
         {
           value: "github-copilot",
@@ -590,12 +801,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "synthetic",
       label: "Synthetic",
       hint: "Anthropic-compatible (multi-model)",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.synthetic || "",
       options: [{ value: "synthetic-api-key", label: "Synthetic API key" }],
     },
     {
       value: "opencode-zen",
       label: "OpenCode Zen",
       hint: "API key",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS["opencode-zen"] || "",
       options: [
         { value: "opencode-zen", label: "OpenCode Zen (multi-model proxy)" },
       ],
@@ -604,13 +817,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "volcengine-plan",
       label: "VolcEngine Coding Plan (火山引擎)",
       hint: "Coding Plan API",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS["volcengine-plan"],
       custom: true,
       options: [
         { value: "volcengine-plan", label: "VolcEngine Coding Plan" },
       ],
       defaults: {
         customProviderName: "volcengine-plan",
-        customBaseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        customBaseUrl: DEFAULT_PROVIDER_BASE_URLS["volcengine-plan"],
         customApiType: "openai-completions",
         customModelId: "ark-code-latest",
       },
@@ -619,13 +833,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "bedrock",
       label: "Amazon Bedrock",
       hint: "Anthropic via AWS",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.bedrock,
       custom: true,
       options: [
         { value: "bedrock", label: "Amazon Bedrock" },
       ],
       defaults: {
         customProviderName: "bedrock",
-        customBaseUrl: "",
+        customBaseUrl: DEFAULT_PROVIDER_BASE_URLS.bedrock,
         customApiType: "anthropic-messages",
         customModelId: "",
       },
@@ -634,13 +849,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "bailian",
       label: "Alibaba Bailian (阿里百炼)",
       hint: "DashScope API",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.bailian,
       custom: true,
       options: [
         { value: "bailian", label: "Alibaba Bailian" },
       ],
       defaults: {
         customProviderName: "bailian",
-        customBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        customBaseUrl: DEFAULT_PROVIDER_BASE_URLS.bailian,
         customApiType: "openai-completions",
         customModelId: "",
       },
@@ -649,13 +865,14 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "ollama",
       label: "Ollama (Local)",
       hint: "Local models, no API key needed",
+      baseUrl: DEFAULT_PROVIDER_BASE_URLS.ollama,
       custom: true,
       options: [
         { value: "ollama", label: "Ollama Local" },
       ],
       defaults: {
         customProviderName: "ollama",
-        customBaseUrl: "http://localhost:11434/v1",
+        customBaseUrl: DEFAULT_PROVIDER_BASE_URLS.ollama,
         customApiType: "openai-completions",
         customModelId: "",
       },
@@ -664,6 +881,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       value: "custom-provider",
       label: "Custom Provider",
       hint: "OpenAI / Anthropic compatible",
+      baseUrl: "",
       custom: true,
       options: [
         { value: "custom-provider", label: "Custom Provider" },
@@ -678,22 +896,28 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
   ];
 
   if (envProvider.enabled) {
+    const envMeta = envProvider.providerMeta || null;
     authGroups.unshift({
       value: "provider-from-env",
       label: "ProviderFromEnv",
-      hint: envProvider.valid ? `AI_PROVIDER=${envProvider.values.aiProvider}` : "Invalid Railway Variables",
+      hint: envProvider.valid
+        ? `AI_PROVIDER=${envProvider.values.aiProviderNormalized || envProvider.values.aiProvider}`
+        : "Invalid Railway Variables",
+      baseUrl: envProvider.values.effectiveProviderBaseUrl || "",
       custom: true,
       fromEnv: true,
       options: [
         {
           value: "provider-from-env",
-          label: "Use AI_PROVIDER / PROVIDER_BASE_URL / PROVIDER_API_KEY",
+          label: "Use AI_PROVIDER / PROVIDER_API_KEY (PROVIDER_BASE_URL only for CUSTOM_PROVIDER)",
         },
       ],
       defaults: {
-        customProviderName: envProvider.values.aiProvider || "",
-        customBaseUrl: envProvider.values.providerBaseUrl || "",
-        customApiType: inferCustomApiTypeByProvider(envProvider.values.aiProvider),
+        customProviderName: envProvider.values.providerName || "",
+        customBaseUrl: envProvider.values.effectiveProviderBaseUrl || "",
+        customApiType:
+          envMeta?.customApiType ||
+          inferCustomApiTypeByProvider(envProvider.values.providerName),
         customModelId: "",
       },
     });
@@ -1040,20 +1264,6 @@ const HTTP_VALIDATION_SKIPPED_AUTH_CHOICES = new Set([
   "github-copilot",
   "copilot-proxy",
 ]);
-
-const DEFAULT_PROVIDER_BASE_URLS = Object.freeze({
-  openai: "https://api.openai.com/v1",
-  anthropic: "https://api.anthropic.com/v1",
-  google: "https://generativelanguage.googleapis.com/v1beta",
-  openrouter: "https://openrouter.ai/api/v1",
-  "ai-gateway": "https://gateway.ai.vercel.com/v1",
-  moonshot: "https://api.moonshot.cn/v1",
-  zai: "https://open.bigmodel.cn/api/paas/v4",
-  minimax: "https://api.minimax.chat/v1",
-  "volcengine-plan": "https://ark.cn-beijing.volces.com/api/coding/v3",
-  bailian: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  ollama: "http://localhost:11434/v1",
-});
 
 function normalizeHttpBaseUrl(rawBaseUrl) {
   const value = String(rawBaseUrl || "").trim();
