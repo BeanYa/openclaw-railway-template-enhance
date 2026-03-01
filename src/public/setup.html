@@ -35,6 +35,8 @@
       previewResult: null,
       previewError: '',
       previewPayloadSignature: '',
+      providerValidationById: {},
+      providerValidationInFlight: false,
       pairingChannel: '',
       pairingCode: '',
       showPairingModal: false,
@@ -185,6 +187,17 @@
           previewOpenclawVersion: 'OpenClaw version',
           previewChangedFiles: 'Changed files',
           previewReason: 'Reason',
+          validateProvider: 'Validate Provider',
+          validatingProvider: 'Validating provider...',
+          providerValidationIdle: 'Not validated yet',
+          providerValidationSuccess: 'Provider validation passed',
+          providerValidationFailed: 'Provider validation failed',
+          providerValidationRequired: 'All added providers must pass validation before next step.',
+          providerValidationRunning: 'Validating all providers...',
+          providerValidationPassedAll: 'All providers passed validation.',
+          validationRequest: 'Validation Request',
+          validationResponse: 'Validation Response',
+          validationStatusCode: 'Status',
         },
         zh: {
           title: '个人 AI 助手',
@@ -306,6 +319,17 @@
           previewOpenclawVersion: 'OpenClaw 版本',
           previewChangedFiles: '改动文件数',
           previewReason: '原因',
+          validateProvider: '校验 Provider',
+          validatingProvider: '正在校验 Provider...',
+          providerValidationIdle: '尚未校验',
+          providerValidationSuccess: 'Provider 校验通过',
+          providerValidationFailed: 'Provider 校验失败',
+          providerValidationRequired: '进入下一步前，所有已添加 Provider 都必须校验通过。',
+          providerValidationRunning: '正在校验全部 Provider...',
+          providerValidationPassedAll: '全部 Provider 校验通过。',
+          validationRequest: '验证请求体',
+          validationResponse: '验证响应',
+          validationStatusCode: '状态码',
         },
       },
 
@@ -337,9 +361,13 @@
       get canGoNext() {
         if (this.step >= this.totalSteps) return false;
         if (this.step === 1) {
-          return this.isProviderStepValid();
+          return this.canLeaveStep1;
         }
         return true;
+      },
+
+      get canLeaveStep1() {
+        return this.isProviderStepValid() && this.areAllProvidersValidated() && !this.providerValidationInFlight;
       },
 
       get providerModelOptions() {
@@ -392,6 +420,9 @@
             this.agents = [{ id: this.newId('agent'), name: 'primary', providerId: '', model: '' }];
           }
           this.syncAgentProviders();
+          for (const provider of this.providers) {
+            this.markProviderValidationDirty(provider);
+          }
           if (this.envProvider.enabled && !this.envProvider.valid && this.envProvider.error) {
             this.log += '[ProviderFromEnv] ' + this.envProvider.error + '\n';
           }
@@ -463,11 +494,14 @@
           provider.customProviderName = this.envProvider.values.aiProvider || provider.customProviderName;
           provider.customBaseUrl = this.envProvider.values.providerBaseUrl || provider.customBaseUrl;
         }
+        this.markProviderValidationDirty(provider);
         this.syncAgentProviders();
       },
 
       addProvider() {
-        this.providers.push(this.createProviderConfig());
+        const provider = this.createProviderConfig();
+        this.providers.push(provider);
+        this.markProviderValidationDirty(provider);
         this.syncAgentProviders();
       },
 
@@ -475,6 +509,11 @@
         if (this.providers.length <= 1) return;
         const removed = this.providers.splice(index, 1)[0];
         if (!removed) return;
+        if (this.providerValidationById[removed.id]) {
+          const next = { ...this.providerValidationById };
+          delete next[removed.id];
+          this.providerValidationById = next;
+        }
         for (const agent of this.agents) {
           if (agent.providerId === removed.id) {
             agent.providerId = '';
@@ -501,18 +540,238 @@
         return model ? `${base} (${model})` : base;
       },
 
+      buildProviderPayload(provider) {
+        return {
+          id: provider.id,
+          authChoice: provider.selectedAuth,
+          authSecret: provider.authSecret,
+          model: this.getProviderModelValue(provider),
+          customProviderName: provider.customProviderName,
+          customBaseUrl: provider.customBaseUrl,
+          customApiType: provider.customApiType,
+          customModelId: provider.customModelId,
+          selectedGroup: provider.selectedGroup,
+        };
+      },
+
+      providerValidationSignature(provider) {
+        const envSig = this.isProviderFromEnvFor(provider)
+          ? JSON.stringify((this.envProvider && this.envProvider.values) || {})
+          : '';
+        return JSON.stringify({
+          provider: this.buildProviderPayload(provider),
+          env: envSig,
+        });
+      },
+
+      getProviderValidationState(provider) {
+        return this.providerValidationById[provider.id] || {
+          status: 'idle',
+          message: '',
+          endpoint: '',
+          statusCode: '',
+          requestPreview: '',
+          responsePreview: '',
+          checkedAt: '',
+          signature: '',
+        };
+      },
+
+      setProviderValidationState(provider, patch) {
+        this.providerValidationById = {
+          ...this.providerValidationById,
+          [provider.id]: {
+            ...this.getProviderValidationState(provider),
+            ...patch,
+          },
+        };
+      },
+
+      markProviderValidationDirty(provider) {
+        const current = this.getProviderValidationState(provider);
+        const nextSignature = this.providerValidationSignature(provider);
+        if (current.signature && current.signature === nextSignature && current.status !== 'idle') {
+          return;
+        }
+        if (current.status === 'idle' && current.signature === nextSignature) return;
+        this.setProviderValidationState(provider, {
+          status: 'idle',
+          message: '',
+          endpoint: '',
+          statusCode: '',
+          requestPreview: '',
+          responsePreview: '',
+          checkedAt: '',
+          signature: nextSignature,
+        });
+      },
+
+      redactProviderPayload(providerPayload) {
+        const p = { ...(providerPayload || {}) };
+        if (p.authSecret) p.authSecret = '[REDACTED]';
+        return p;
+      },
+
+      buildValidationRequestPreview(provider) {
+        return JSON.stringify(
+          { provider: this.redactProviderPayload(this.buildProviderPayload(provider)) },
+          null,
+          2
+        );
+      },
+
+      isProviderValidated(provider) {
+        const state = this.getProviderValidationState(provider);
+        if (state.status !== 'valid') return false;
+        return state.signature === this.providerValidationSignature(provider);
+      },
+
+      areAllProvidersValidated() {
+        if (!Array.isArray(this.providers) || this.providers.length === 0) return false;
+        for (const provider of this.providers) {
+          if (!this.isProviderComplete(provider)) return false;
+          if (!this.isProviderValidated(provider)) return false;
+        }
+        return true;
+      },
+
+      providerValidationClass(provider) {
+        const state = this.getProviderValidationState(provider);
+        if (state.status === 'valid') return 'text-emerald-600 dark:text-emerald-400';
+        if (state.status === 'invalid') return 'text-red-600 dark:text-red-400';
+        if (state.status === 'validating') return 'text-amber-600 dark:text-amber-400';
+        return 'text-neutral-500 dark:text-neutral-400';
+      },
+
+      providerValidationMessage(provider) {
+        const state = this.getProviderValidationState(provider);
+        if (state.status === 'validating') return this.t('validatingProvider');
+        if (state.status === 'valid') return state.message || this.t('providerValidationSuccess');
+        if (state.status === 'invalid') return state.message || this.t('providerValidationFailed');
+        return this.t('providerValidationIdle');
+      },
+
+      isProviderComplete(provider) {
+        const group = String(provider.selectedGroup || '').trim();
+        const model = this.getProviderModelValue(provider);
+        if (!group || !model) return false;
+        if (this.isProviderFromEnvFor(provider) && !(this.envProvider && this.envProvider.valid)) {
+          return false;
+        }
+        return true;
+      },
+
+      async validateProviderConfig(provider, opts = {}) {
+        const force = Boolean(opts.force);
+        const silent = Boolean(opts.silent);
+        if (!provider) return false;
+        if (this.providerValidationInFlight && this.getProviderValidationState(provider).status !== 'validating') {
+          return false;
+        }
+        const requestPreview = this.buildValidationRequestPreview(provider);
+
+        if (!this.isProviderComplete(provider)) {
+          this.setProviderValidationState(provider, {
+            status: 'invalid',
+            message: this.t('providerRequiredNext'),
+            endpoint: '',
+            statusCode: '',
+            requestPreview,
+            responsePreview: '',
+            checkedAt: new Date().toISOString(),
+            signature: this.providerValidationSignature(provider),
+          });
+          return false;
+        }
+
+        const signature = this.providerValidationSignature(provider);
+        const current = this.getProviderValidationState(provider);
+        if (!force && current.status === 'valid' && current.signature === signature) {
+          return true;
+        }
+
+        this.setProviderValidationState(provider, {
+          status: 'validating',
+          message: '',
+          endpoint: '',
+          statusCode: '',
+          requestPreview,
+          responsePreview: '',
+          checkedAt: '',
+          signature,
+        });
+
+        this.providerValidationInFlight = true;
+        try {
+          const res = await fetch('/setup/api/provider/validate', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ provider: this.buildProviderPayload(provider) }),
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { ok: false, error: text || ('HTTP ' + res.status) }; }
+
+          if (!res.ok || !j.ok || !j.valid) {
+            const msg = j.error || j.message || this.t('providerValidationFailed');
+            this.setProviderValidationState(provider, {
+              status: 'invalid',
+              message: msg,
+              endpoint: j.endpoint || '',
+              statusCode: j.statusCode != null ? String(j.statusCode) : String(res.status || ''),
+              requestPreview,
+              responsePreview: text || '',
+              checkedAt: new Date().toISOString(),
+              signature,
+            });
+            if (!silent) this.log += '[provider validate] ' + (provider.id || '') + ' failed: ' + msg + '\n';
+            return false;
+          }
+
+          const msg = j.message || this.t('providerValidationSuccess');
+          this.setProviderValidationState(provider, {
+            status: 'valid',
+            message: msg,
+            endpoint: j.endpoint || '',
+            statusCode: j.statusCode != null ? String(j.statusCode) : String(res.status || ''),
+            requestPreview: '',
+            responsePreview: '',
+            checkedAt: new Date().toISOString(),
+            signature,
+          });
+          if (this.areAllProvidersValidated()) {
+            this.navError = '';
+          }
+          if (!silent) this.log += '[provider validate] ' + (provider.id || '') + ' ok: ' + msg + '\n';
+          return true;
+        } catch (e) {
+          const msg = this.t('providerValidationFailed') + ': ' + String(e);
+          this.setProviderValidationState(provider, {
+            status: 'invalid',
+            message: msg,
+            endpoint: '',
+            statusCode: '',
+            requestPreview,
+            responsePreview: String(e),
+            checkedAt: new Date().toISOString(),
+            signature,
+          });
+          if (!silent) this.log += '[provider validate] ' + (provider.id || '') + ' failed: ' + msg + '\n';
+          return false;
+        } finally {
+          this.providerValidationInFlight = false;
+        }
+      },
+
       isProviderStepValid() {
         if (!Array.isArray(this.providers) || this.providers.length === 0) return false;
         for (const p of this.providers) {
-          const group = String(p.selectedGroup || '').trim();
-          const model = this.getProviderModelValue(p);
-          if (!group || !model) continue;
-          if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
-            continue;
+          if (!this.isProviderComplete(p)) {
+            return false;
           }
-          return true;
         }
-        return false;
+        return true;
       },
 
       ensureProviderStepValid() {
@@ -565,17 +824,7 @@
       },
 
       buildSetupPayload() {
-        const providerPayload = this.providers.map(p => ({
-          id: p.id,
-          authChoice: p.selectedAuth,
-          authSecret: p.authSecret,
-          model: this.getProviderModelValue(p),
-          customProviderName: p.customProviderName,
-          customBaseUrl: p.customBaseUrl,
-          customApiType: p.customApiType,
-          customModelId: p.customModelId,
-          selectedGroup: p.selectedGroup,
-        }));
+        const providerPayload = this.providers.map(p => this.buildProviderPayload(p));
 
         const payload = {
           providers: providerPayload,
@@ -668,11 +917,17 @@
         await this.previewChanges(payload, { force, suppressLog: true });
       },
 
-      goToStep(targetStep) {
+      async goToStep(targetStep) {
         const s = Number(targetStep);
         if (!Number.isInteger(s) || s < 1 || s > this.totalSteps) return;
         if (s === this.step) return;
-        if (s > this.step && this.step === 1 && !this.ensureProviderStepValid()) return;
+        if (s > this.step && this.step === 1) {
+          if (!this.ensureProviderStepValid()) return;
+          if (!this.canLeaveStep1) {
+            this.navError = this.t('providerValidationRequired');
+            return;
+          }
+        }
         this.navError = '';
         this.step = s;
         if (this.step === 4) {
@@ -680,8 +935,14 @@
         }
       },
 
-      nextStep() {
+      async nextStep() {
         if (this.step === 1 && !this.ensureProviderStepValid()) return;
+        if (this.step === 1) {
+          if (!this.canLeaveStep1) {
+            this.navError = this.t('providerValidationRequired');
+            return;
+          }
+        }
         this.navError = '';
         if (this.step < this.totalSteps) this.step++;
         if (this.step === 4) {
@@ -700,6 +961,14 @@
             this.log += '\n[ProviderFromEnv] ' + ((this.envProvider && this.envProvider.error) || 'Invalid provider env variables') + '\n';
             return;
           }
+        }
+
+        if (!this.ensureProviderStepValid()) {
+          return;
+        }
+        if (!this.areAllProvidersValidated()) {
+          this.log += '\n' + this.t('providerValidationRequired') + '\n';
+          return;
         }
 
         const payload = this.buildSetupPayload();
@@ -1197,7 +1466,11 @@
       <div class="flex items-center justify-center gap-2 mb-8">
         <template x-for="s in totalSteps" :key="s">
           <div class="flex items-center">
-            <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-all cursor-pointer" :class="step === s ? 'bg-red-600 text-white' : (step > s ? 'bg-emerald-600 text-white' : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-500')" @click="goToStep(s)" x-text="s"></div>
+            <div
+              class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-all"
+              :class="(step === 1 && s > 1 && !canLeaveStep1) ? 'bg-neutral-200 dark:bg-neutral-800 text-neutral-400 cursor-not-allowed opacity-60' : (step === s ? 'bg-red-600 text-white cursor-pointer' : (step > s ? 'bg-emerald-600 text-white cursor-pointer' : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-500 cursor-pointer'))"
+              @click="(step === 1 && s > 1 && !canLeaveStep1) ? null : goToStep(s)"
+              x-text="s"></div>
             <div x-show="s < totalSteps" class="w-12 h-0.5 mx-1" :class="step > s ? 'bg-emerald-600' : 'bg-neutral-200 dark:bg-neutral-800'"></div>
           </div>
         </template>
@@ -1211,7 +1484,7 @@
 
           <div class="space-y-5">
             <template x-for="(provider, pIndex) in providers" :key="provider.id">
-              <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4 space-y-4">
+              <div class="rounded-lg border border-neutral-200 dark:border-neutral-800 p-4 space-y-4" @input="markProviderValidationDirty(provider)" @change="markProviderValidationDirty(provider)">
                 <div class="flex items-center justify-between">
                   <h4 class="text-sm font-medium" x-text="t('providerConfigTitle') + ' #' + (pIndex + 1)"></h4>
                   <button
@@ -1301,6 +1574,37 @@
                   <label class="block text-xs uppercase tracking-wide text-neutral-500 font-medium mb-2" x-text="t('modelLabel')"></label>
                   <input x-model="provider.model" @input="syncAgentProviders()" type="text" :placeholder="t('modelPlaceholder')" class="w-full bg-neutral-50 dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 rounded-lg px-4 py-3 text-sm placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-red-500 transition-colors" />
                   <p class="text-xs text-neutral-500 dark:text-neutral-600 mt-2" x-text="t('modelHint')"></p>
+                </div>
+
+                <div class="pt-3 border-t border-neutral-200 dark:border-neutral-800 space-y-2">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      @click="validateProviderConfig(provider, { force: true, silent: false })"
+                      type="button"
+                      :disabled="providerValidationInFlight || getProviderValidationState(provider).status === 'validating' || !isProviderComplete(provider)"
+                      class="bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed text-neutral-700 dark:text-neutral-300 px-3 py-1.5 rounded-lg text-xs font-medium border border-neutral-300 dark:border-neutral-700 transition-colors"
+                      x-text="t('validateProvider')"></button>
+                    <span class="text-xs break-all" :class="providerValidationClass(provider)" x-text="providerValidationMessage(provider)"></span>
+                  </div>
+                  <p x-show="getProviderValidationState(provider).endpoint" class="text-[11px] text-neutral-500 dark:text-neutral-400 break-all">
+                    <span>endpoint: </span>
+                    <span x-text="getProviderValidationState(provider).endpoint"></span>
+                  </p>
+                  <p x-show="getProviderValidationState(provider).statusCode" class="text-[11px] text-neutral-500 dark:text-neutral-400 break-all">
+                    <span x-text="t('validationStatusCode')"></span>
+                    <span>: </span>
+                    <span x-text="getProviderValidationState(provider).statusCode"></span>
+                  </p>
+                  <div x-show="getProviderValidationState(provider).status === 'invalid'" class="space-y-2">
+                    <div x-show="getProviderValidationState(provider).requestPreview" class="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-900/20 p-2">
+                      <p class="text-[11px] font-medium text-red-700 dark:text-red-300" x-text="t('validationRequest')"></p>
+                      <pre class="mt-1 text-[11px] leading-5 whitespace-pre-wrap break-all text-red-900 dark:text-red-200" x-text="getProviderValidationState(provider).requestPreview"></pre>
+                    </div>
+                    <div x-show="getProviderValidationState(provider).responsePreview" class="rounded border border-red-200 dark:border-red-900/60 bg-red-50 dark:bg-red-900/20 p-2">
+                      <p class="text-[11px] font-medium text-red-700 dark:text-red-300" x-text="t('validationResponse')"></p>
+                      <pre class="mt-1 text-[11px] leading-5 whitespace-pre-wrap break-all text-red-900 dark:text-red-200" x-text="getProviderValidationState(provider).responsePreview"></pre>
+                    </div>
+                  </div>
                 </div>
               </div>
             </template>

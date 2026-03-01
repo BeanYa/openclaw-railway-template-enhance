@@ -1035,6 +1035,441 @@ function isCustomProvider(authChoice) {
   return CUSTOM_PROVIDER_CHOICES.includes(authChoice);
 }
 
+const HTTP_VALIDATION_SKIPPED_AUTH_CHOICES = new Set([
+  "qwen-portal",
+  "github-copilot",
+  "copilot-proxy",
+]);
+
+const DEFAULT_PROVIDER_BASE_URLS = Object.freeze({
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com/v1",
+  google: "https://generativelanguage.googleapis.com/v1beta",
+  openrouter: "https://openrouter.ai/api/v1",
+  "ai-gateway": "https://gateway.ai.vercel.com/v1",
+  moonshot: "https://api.moonshot.cn/v1",
+  zai: "https://open.bigmodel.cn/api/paas/v4",
+  minimax: "https://api.minimax.chat/v1",
+  "volcengine-plan": "https://ark.cn-beijing.volces.com/api/coding/v3",
+  bailian: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  ollama: "http://localhost:11434/v1",
+});
+
+function normalizeHttpBaseUrl(rawBaseUrl) {
+  const value = String(rawBaseUrl || "").trim();
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return "";
+    }
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function joinBaseUrl(baseUrl, pathSuffix) {
+  const cleanBase = normalizeHttpBaseUrl(baseUrl);
+  if (!cleanBase) return "";
+  const baseWithSlash = `${cleanBase}/`;
+  const cleanSuffix = String(pathSuffix || "").replace(/^\/+/, "");
+  return new URL(cleanSuffix, baseWithSlash).toString();
+}
+
+function shortResponseBody(bodyText) {
+  return String(bodyText || "").replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+function redactValidationUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.searchParams.has("key")) {
+      u.searchParams.set("key", "[REDACTED]");
+    }
+    return u.toString();
+  } catch {
+    return String(url || "");
+  }
+}
+
+function inferProviderApiTypeForValidation(entry, providerName) {
+  const customApiType = String(entry.customApiType || "").trim();
+  if (customApiType) {
+    if (customApiType === "anthropic") return "anthropic-messages";
+    return customApiType;
+  }
+
+  const group = String(entry.selectedGroup || "").trim().toLowerCase();
+  const authChoice = String(entry.authChoice || "").trim().toLowerCase();
+  const provider = String(providerName || "").trim().toLowerCase();
+
+  if (group === "google" || provider === "google" || authChoice === "gemini-api-key") {
+    return "google-generative-ai";
+  }
+
+  if (
+    group === "anthropic" ||
+    provider === "anthropic" ||
+    provider === "bedrock" ||
+    authChoice === "apikey"
+  ) {
+    return "anthropic-messages";
+  }
+
+  return "openai-completions";
+}
+
+function resolveDefaultBaseUrlForProvider({ providerName, selectedGroup }) {
+  const byProvider = DEFAULT_PROVIDER_BASE_URLS[String(providerName || "").trim().toLowerCase()];
+  if (byProvider) return byProvider;
+  const byGroup = DEFAULT_PROVIDER_BASE_URLS[String(selectedGroup || "").trim().toLowerCase()];
+  if (byGroup) return byGroup;
+  return "";
+}
+
+function resolveProviderValidationTarget(entry = {}) {
+  const authChoice = String(entry.authChoice || "").trim();
+  const selectedGroup = String(entry.selectedGroup || "").trim();
+  const providerName = inferProviderName(entry);
+  const baseUrlRaw =
+    String(entry.customBaseUrl || "").trim() ||
+    resolveDefaultBaseUrlForProvider({ providerName, selectedGroup });
+  const baseUrl = normalizeHttpBaseUrl(baseUrlRaw);
+  const apiType = inferProviderApiTypeForValidation(entry, providerName);
+  const apiKey = String(entry.authSecret || "").trim();
+  const model = String(entry.model || "").trim();
+
+  return {
+    authChoice,
+    selectedGroup,
+    providerName,
+    baseUrl,
+    apiType,
+    apiKey,
+    model,
+  };
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const bodyText = await response.text();
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      bodyText,
+      url,
+      error: "",
+    };
+  } catch (err) {
+    const isAbort = err?.name === "AbortError";
+    return {
+      ok: false,
+      status: 0,
+      statusText: "",
+      bodyText: "",
+      url,
+      error: isAbort ? "request-timeout" : String(err?.message || err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildValidationFailureResult({ target, endpoint, message, statusCode = 0, details = "" }) {
+  return {
+    valid: false,
+    skipped: false,
+    providerName: target.providerName,
+    apiType: target.apiType,
+    endpoint: endpoint ? redactValidationUrl(endpoint) : "",
+    statusCode,
+    message,
+    details: details || "",
+  };
+}
+
+function buildValidationSuccessResult({ target, endpoint, message, statusCode = 200, details = "" }) {
+  return {
+    valid: true,
+    skipped: false,
+    providerName: target.providerName,
+    apiType: target.apiType,
+    endpoint: endpoint ? redactValidationUrl(endpoint) : "",
+    statusCode,
+    message,
+    details: details || "",
+  };
+}
+
+async function probeOpenAiCompatibleProvider(target) {
+  const candidates = [
+    joinBaseUrl(target.baseUrl, "/models"),
+    joinBaseUrl(target.baseUrl, "/v1/models"),
+  ].filter(Boolean);
+  const uniqueCandidates = [...new Set(candidates)];
+
+  let lastResult = null;
+  for (const endpoint of uniqueCandidates) {
+    const result = await fetchWithTimeout(
+      endpoint,
+      {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${target.apiKey}`,
+          accept: "application/json",
+        },
+      },
+      12_000,
+    );
+    lastResult = result;
+
+    if (result.ok) {
+      return buildValidationSuccessResult({
+        target,
+        endpoint,
+        statusCode: result.status,
+        message: "Provider endpoint and API key look valid.",
+      });
+    }
+
+    if (result.status === 429) {
+      return buildValidationSuccessResult({
+        target,
+        endpoint,
+        statusCode: result.status,
+        message: "Provider is reachable and credentials were accepted (rate limited).",
+      });
+    }
+
+    if (result.status === 401 || result.status === 403) {
+      return buildValidationFailureResult({
+        target,
+        endpoint,
+        statusCode: result.status,
+        message: "API key was rejected by provider.",
+        details: shortResponseBody(result.bodyText),
+      });
+    }
+
+    if (result.status === 404 || result.status === 405) {
+      continue;
+    }
+  }
+
+  return buildValidationFailureResult({
+    target,
+    endpoint: lastResult?.url || uniqueCandidates[0] || "",
+    statusCode: lastResult?.status || 0,
+    message: "Could not validate provider endpoint using OpenAI-compatible probe.",
+    details: lastResult?.error || shortResponseBody(lastResult?.bodyText),
+  });
+}
+
+async function probeAnthropicProvider(target) {
+  const candidates = [
+    joinBaseUrl(target.baseUrl, "/models"),
+    joinBaseUrl(target.baseUrl, "/v1/models"),
+  ].filter(Boolean);
+  const uniqueCandidates = [...new Set(candidates)];
+
+  let lastResult = null;
+  for (const endpoint of uniqueCandidates) {
+    const result = await fetchWithTimeout(
+      endpoint,
+      {
+        method: "GET",
+        headers: {
+          "x-api-key": target.apiKey,
+          "anthropic-version": "2023-06-01",
+          accept: "application/json",
+        },
+      },
+      12_000,
+    );
+    lastResult = result;
+
+    if (result.ok) {
+      return buildValidationSuccessResult({
+        target,
+        endpoint,
+        statusCode: result.status,
+        message: "Anthropic-compatible endpoint and API key look valid.",
+      });
+    }
+
+    if (result.status === 429) {
+      return buildValidationSuccessResult({
+        target,
+        endpoint,
+        statusCode: result.status,
+        message: "Provider is reachable and credentials were accepted (rate limited).",
+      });
+    }
+
+    if (result.status === 401 || result.status === 403) {
+      return buildValidationFailureResult({
+        target,
+        endpoint,
+        statusCode: result.status,
+        message: "API key was rejected by provider.",
+        details: shortResponseBody(result.bodyText),
+      });
+    }
+
+    if (result.status === 404 || result.status === 405) {
+      continue;
+    }
+  }
+
+  return buildValidationFailureResult({
+    target,
+    endpoint: lastResult?.url || uniqueCandidates[0] || "",
+    statusCode: lastResult?.status || 0,
+    message: "Could not validate provider endpoint using Anthropic-compatible probe.",
+    details: lastResult?.error || shortResponseBody(lastResult?.bodyText),
+  });
+}
+
+async function probeGoogleProvider(target) {
+  const candidates = [
+    joinBaseUrl(target.baseUrl, "/models"),
+    joinBaseUrl(target.baseUrl, "/v1beta/models"),
+  ].filter(Boolean);
+  const uniqueCandidates = [...new Set(candidates)];
+
+  let lastResult = null;
+  for (const endpoint of uniqueCandidates) {
+    const endpointUrl = new URL(endpoint);
+    endpointUrl.searchParams.set("key", target.apiKey);
+    const result = await fetchWithTimeout(
+      endpointUrl.toString(),
+      {
+        method: "GET",
+        headers: {
+          accept: "application/json",
+        },
+      },
+      12_000,
+    );
+    lastResult = result;
+
+    if (result.ok) {
+      return buildValidationSuccessResult({
+        target,
+        endpoint: endpointUrl.toString(),
+        statusCode: result.status,
+        message: "Google-compatible endpoint and API key look valid.",
+      });
+    }
+
+    if (result.status === 429) {
+      return buildValidationSuccessResult({
+        target,
+        endpoint: endpointUrl.toString(),
+        statusCode: result.status,
+        message: "Provider is reachable and credentials were accepted (rate limited).",
+      });
+    }
+
+    if (result.status === 401 || result.status === 403) {
+      return buildValidationFailureResult({
+        target,
+        endpoint: endpointUrl.toString(),
+        statusCode: result.status,
+        message: "API key was rejected by provider.",
+        details: shortResponseBody(result.bodyText),
+      });
+    }
+
+    if (result.status === 404 || result.status === 405) {
+      continue;
+    }
+  }
+
+  return buildValidationFailureResult({
+    target,
+    endpoint: lastResult?.url || uniqueCandidates[0] || "",
+    statusCode: lastResult?.status || 0,
+    message: "Could not validate provider endpoint using Google-compatible probe.",
+    details: lastResult?.error || shortResponseBody(lastResult?.bodyText),
+  });
+}
+
+async function validateProviderConnection(entry) {
+  const target = resolveProviderValidationTarget(entry);
+
+  if (!target.authChoice) {
+    return {
+      valid: false,
+      skipped: false,
+      providerName: target.providerName,
+      apiType: target.apiType,
+      endpoint: "",
+      statusCode: 0,
+      message: "Missing authChoice.",
+      details: "",
+    };
+  }
+
+  if (HTTP_VALIDATION_SKIPPED_AUTH_CHOICES.has(target.authChoice)) {
+    return {
+      valid: true,
+      skipped: true,
+      providerName: target.providerName,
+      apiType: target.apiType,
+      endpoint: "",
+      statusCode: 0,
+      message: `Validation skipped for ${target.authChoice}.`,
+      details: "OAuth/local auth flow requires interactive validation.",
+    };
+  }
+
+  if (!target.baseUrl) {
+    return {
+      valid: false,
+      skipped: false,
+      providerName: target.providerName,
+      apiType: target.apiType,
+      endpoint: "",
+      statusCode: 0,
+      message: "Cannot infer a valid provider base URL.",
+      details:
+        "Set custom base URL in setup, or choose a provider with a known default base URL.",
+    };
+  }
+
+  if (!target.apiKey) {
+    return {
+      valid: false,
+      skipped: false,
+      providerName: target.providerName,
+      apiType: target.apiType,
+      endpoint: "",
+      statusCode: 0,
+      message: "Missing API key/token.",
+      details: "",
+    };
+  }
+
+  if (target.apiType === "anthropic-messages") {
+    return probeAnthropicProvider(target);
+  }
+
+  if (target.apiType === "google-generative-ai") {
+    return probeGoogleProvider(target);
+  }
+
+  return probeOpenAiCompatibleProvider(target);
+}
+
 function listAuthProfileStorePaths() {
   const files = [];
   const legacy = path.join(STATE_DIR, "agent", "auth-profiles.json");
@@ -2221,6 +2656,59 @@ app.post("/setup/api/preview", requireSetupAuth, async (req, res) => {
     return res
       .status(500)
       .json({ ok: false, error: `Internal error: ${String(err)}` });
+  }
+});
+
+app.post("/setup/api/provider/validate", requireSetupAuth, async (req, res) => {
+  try {
+    const rawBody = req.body || {};
+    const rawProvider =
+      rawBody.provider &&
+      typeof rawBody.provider === "object" &&
+      !Array.isArray(rawBody.provider)
+        ? rawBody.provider
+        : rawBody;
+
+    if (!rawProvider || typeof rawProvider !== "object" || Array.isArray(rawProvider)) {
+      return res.status(400).json({
+        ok: false,
+        valid: false,
+        error: "Invalid request body: provider object is required.",
+      });
+    }
+
+    const normalized = normalizeSetupPayload({ providers: [rawProvider] });
+    if (!normalized.ok) {
+      return res.status(400).json({
+        ok: false,
+        valid: false,
+        error: normalized.error,
+      });
+    }
+
+    const providerEntry = buildProviderEntries(normalized.payload)[0] || {};
+    const providerValidationError = validatePayload(providerEntry);
+    if (providerValidationError) {
+      return res.status(400).json({
+        ok: false,
+        valid: false,
+        error: providerValidationError,
+      });
+    }
+
+    const result = await validateProviderConnection(providerEntry);
+    const statusCode = result.valid ? 200 : 400;
+    return res.status(statusCode).json({
+      ok: result.valid,
+      ...result,
+    });
+  } catch (err) {
+    console.error("[/setup/api/provider/validate] error:", err);
+    return res.status(500).json({
+      ok: false,
+      valid: false,
+      error: `Internal error: ${String(err)}`,
+    });
   }
 });
 
