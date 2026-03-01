@@ -475,7 +475,7 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
       defaults: {
         customProviderName: "bedrock",
         customBaseUrl: "",
-        customApiType: "anthropic",
+        customApiType: "anthropic-messages",
         customModelId: "",
       },
     },
@@ -654,22 +654,33 @@ function isCustomProvider(authChoice) {
   return CUSTOM_PROVIDER_CHOICES.includes(authChoice);
 }
 
+function keyPath(prefix, key) {
+  return `${prefix}[${JSON.stringify(String(key))}]`;
+}
+
 async function configureCustomProvider(payload) {
   const providerName =
     payload.authChoice === "custom-provider"
       ? (payload.customProviderName || "custom").trim()
       : payload.authChoice;
   const baseUrl = (payload.customBaseUrl || "").trim();
-  const apiType = (payload.customApiType || "openai-completions").trim();
+  const rawApiType = (payload.customApiType || "openai-completions").trim();
+  const apiType =
+    rawApiType === "anthropic" ? "anthropic-messages" : rawApiType;
   const modelId = (payload.customModelId || "").trim();
   const apiKey = (payload.authSecret || "").trim();
+  const profileId = `${providerName}:default`;
 
   let extra = "";
+  let ok = true;
 
   // Write provider config to models.providers
   const providerCfg = { api: apiType };
   if (baseUrl) providerCfg.baseUrl = baseUrl;
   if (apiKey) providerCfg.apiKey = apiKey;
+  if (modelId) {
+    providerCfg.models = [{ id: modelId, name: modelId }];
+  }
 
   const providerResult = await runCmd(
     OPENCLAW_NODE,
@@ -677,18 +688,19 @@ async function configureCustomProvider(payload) {
       "config",
       "set",
       "--json",
-      `models.providers.${providerName}`,
+      keyPath("models.providers", providerName),
       JSON.stringify(providerCfg),
     ]),
   );
   extra += `[custom-provider] models.providers.${providerName} exit=${providerResult.code}\n`;
+  if (providerResult.output) extra += providerResult.output;
+  if (providerResult.code !== 0) ok = false;
 
-  // Write auth profile
+  // Write auth profile metadata (credentials are read from models.providers.*.apiKey)
   if (apiKey) {
     const authProfile = {
-      type: "api_key",
       provider: providerName,
-      key: apiKey,
+      mode: "api_key",
     };
     const authResult = await runCmd(
       OPENCLAW_NODE,
@@ -696,12 +708,36 @@ async function configureCustomProvider(payload) {
         "config",
         "set",
         "--json",
-        `auth-profiles.profiles.${providerName}:default`,
+        keyPath("auth.profiles", profileId),
         JSON.stringify(authProfile),
       ]),
     );
-    extra += `[custom-provider] auth-profiles.${providerName}:default exit=${authResult.code}\n`;
+    extra += `[custom-provider] auth.profiles.${profileId} exit=${authResult.code}\n`;
+    if (authResult.output) extra += authResult.output;
+    if (authResult.code !== 0) ok = false;
+
+    const authOrderResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "config",
+        "set",
+        "--json",
+        keyPath("auth.order", providerName),
+        JSON.stringify([profileId]),
+      ]),
+    );
+    extra += `[custom-provider] auth.order.${providerName} exit=${authOrderResult.code}\n`;
+    if (authOrderResult.output) extra += authOrderResult.output;
+    if (authOrderResult.code !== 0) ok = false;
+
   }
+
+  const unsetOpenAIProfile = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs(["config", "unset", keyPath("auth.profiles", "openai:default")]),
+  );
+  extra += `[custom-provider] unset auth.profiles.openai:default exit=${unsetOpenAIProfile.code}\n`;
+  if (unsetOpenAIProfile.output) extra += unsetOpenAIProfile.output;
 
   // Set model
   if (modelId) {
@@ -712,9 +748,10 @@ async function configureCustomProvider(payload) {
     );
     extra += `[custom-provider] models set ${fullModel} exit=${modelResult.code}\n`;
     if (modelResult.output) extra += modelResult.output;
+    if (modelResult.code !== 0) ok = false;
   }
 
-  return extra;
+  return { ok, output: extra };
 }
 
 function validatePayload(payload) {
@@ -738,11 +775,17 @@ function validatePayload(payload) {
       return `Invalid ${field}: must be a string`;
     }
   }
-  if (
-    payload.customApiType &&
-    !["openai-completions", "anthropic"].includes(payload.customApiType)
-  ) {
-    return `Invalid customApiType: must be "openai-completions" or "anthropic"`;
+  if (payload.customApiType) {
+    const validApiTypes = [
+      "openai-completions",
+      "openai-responses",
+      "anthropic",
+      "anthropic-messages",
+      "google-generative-ai",
+    ];
+    if (!validApiTypes.includes(payload.customApiType)) {
+      return `Invalid customApiType: must be one of ${validApiTypes.join(", ")}`;
+    }
   }
   return null;
 }
@@ -813,7 +856,16 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
 
       if (isCustomProvider(payload.authChoice)) {
         extra += "\n[setup] Configuring custom provider...\n";
-        extra += await configureCustomProvider(payload);
+        const customProviderResult = await configureCustomProvider(payload);
+        extra += customProviderResult.output;
+        if (!customProviderResult.ok) {
+          return res.status(500).json({
+            ok: false,
+            output:
+              `${onboard.output}${extra}\n` +
+              "[setup] Custom provider setup failed. Check logs above.\n",
+          });
+        }
       } else if (payload.model?.trim()) {
         extra += `[setup] Setting model to ${payload.model.trim()}...\n`;
         const modelResult = await runCmd(
@@ -821,6 +873,14 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
           clawArgs(["models", "set", payload.model.trim()]),
         );
         extra += `[models set] exit=${modelResult.code}\n${modelResult.output || ""}`;
+        if (modelResult.code !== 0) {
+          return res.status(500).json({
+            ok: false,
+            output:
+              `${onboard.output}${extra}\n` +
+              "[setup] Model setup failed. Check logs above.\n",
+          });
+        }
       }
 
       async function configureChannel(name, cfgObj) {
