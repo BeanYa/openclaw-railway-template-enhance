@@ -449,6 +449,81 @@ app.get("/setup/api/status", requireSetupAuth, async (_req, res) => {
         { value: "opencode-zen", label: "OpenCode Zen (multi-model proxy)" },
       ],
     },
+    {
+      value: "volcengine-plan",
+      label: "VolcEngine Coding Plan (火山引擎)",
+      hint: "Coding Plan API",
+      custom: true,
+      options: [
+        { value: "volcengine-plan", label: "VolcEngine Coding Plan" },
+      ],
+      defaults: {
+        customProviderName: "volcengine-plan",
+        customBaseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        customApiType: "openai-completions",
+        customModelId: "ark-code-latest",
+      },
+    },
+    {
+      value: "bedrock",
+      label: "Amazon Bedrock",
+      hint: "Anthropic via AWS",
+      custom: true,
+      options: [
+        { value: "bedrock", label: "Amazon Bedrock" },
+      ],
+      defaults: {
+        customProviderName: "bedrock",
+        customBaseUrl: "",
+        customApiType: "anthropic",
+        customModelId: "",
+      },
+    },
+    {
+      value: "bailian",
+      label: "Alibaba Bailian (阿里百炼)",
+      hint: "DashScope API",
+      custom: true,
+      options: [
+        { value: "bailian", label: "Alibaba Bailian" },
+      ],
+      defaults: {
+        customProviderName: "bailian",
+        customBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        customApiType: "openai-completions",
+        customModelId: "",
+      },
+    },
+    {
+      value: "ollama",
+      label: "Ollama (Local)",
+      hint: "Local models, no API key needed",
+      custom: true,
+      options: [
+        { value: "ollama", label: "Ollama Local" },
+      ],
+      defaults: {
+        customProviderName: "ollama",
+        customBaseUrl: "http://localhost:11434/v1",
+        customApiType: "openai-completions",
+        customModelId: "",
+      },
+    },
+    {
+      value: "custom-provider",
+      label: "Custom Provider",
+      hint: "OpenAI / Anthropic compatible",
+      custom: true,
+      options: [
+        { value: "custom-provider", label: "Custom Provider" },
+      ],
+      defaults: {
+        customProviderName: "",
+        customBaseUrl: "",
+        customApiType: "openai-completions",
+        customModelId: "",
+      },
+    },
   ];
 
   res.json({
@@ -484,28 +559,37 @@ function buildOnboardArgs(payload) {
   ];
 
   if (payload.authChoice) {
-    args.push("--auth-choice", payload.authChoice);
+    if (isCustomProvider(payload.authChoice)) {
+      // Custom providers: bootstrap with openai-api-key placeholder to create initial config
+      args.push(
+        "--auth-choice",
+        "openai-api-key",
+        "--openai-api-key",
+        "sk-placeholder-for-custom-provider",
+      );
+    } else {
+      args.push("--auth-choice", payload.authChoice);
 
-    const secret = (payload.authSecret || "").trim();
-    const map = {
-      "openai-api-key": "--openai-api-key",
-      apiKey: "--anthropic-api-key",
-      "openrouter-api-key": "--openrouter-api-key",
-      "ai-gateway-api-key": "--ai-gateway-api-key",
-      "moonshot-api-key": "--moonshot-api-key",
-      "kimi-code-api-key": "--kimi-code-api-key",
-      "gemini-api-key": "--gemini-api-key",
-      "zai-api-key": "--zai-api-key",
-      "minimax-api": "--minimax-api-key",
-      "minimax-api-lightning": "--minimax-api-key",
-      "synthetic-api-key": "--synthetic-api-key",
-      "opencode-zen": "--opencode-zen-api-key",
-    };
-    const flag = map[payload.authChoice];
-    if (flag && secret) {
-      args.push(flag, secret);
+      const secret = (payload.authSecret || "").trim();
+      const map = {
+        "openai-api-key": "--openai-api-key",
+        apiKey: "--anthropic-api-key",
+        "openrouter-api-key": "--openrouter-api-key",
+        "ai-gateway-api-key": "--ai-gateway-api-key",
+        "moonshot-api-key": "--moonshot-api-key",
+        "kimi-code-api-key": "--kimi-code-api-key",
+        "gemini-api-key": "--gemini-api-key",
+        "zai-api-key": "--zai-api-key",
+        "minimax-api": "--minimax-api-key",
+        "minimax-api-lightning": "--minimax-api-key",
+        "synthetic-api-key": "--synthetic-api-key",
+        "opencode-zen": "--opencode-zen-api-key",
+      };
+      const flag = map[payload.authChoice];
+      if (flag && secret) {
+        args.push(flag, secret);
+      }
     }
-
   }
 
   return args;
@@ -551,10 +635,90 @@ const VALID_AUTH_CHOICES = [
   "copilot-proxy",
   "synthetic-api-key",
   "opencode-zen",
+  "volcengine-plan",
+  "bedrock",
+  "bailian",
+  "ollama",
+  "custom-provider",
 ];
 
+const CUSTOM_PROVIDER_CHOICES = [
+  "volcengine-plan",
+  "bedrock",
+  "bailian",
+  "ollama",
+  "custom-provider",
+];
+
+function isCustomProvider(authChoice) {
+  return CUSTOM_PROVIDER_CHOICES.includes(authChoice);
+}
+
+async function configureCustomProvider(payload) {
+  const providerName =
+    payload.authChoice === "custom-provider"
+      ? (payload.customProviderName || "custom").trim()
+      : payload.authChoice;
+  const baseUrl = (payload.customBaseUrl || "").trim();
+  const apiType = (payload.customApiType || "openai-completions").trim();
+  const modelId = (payload.customModelId || "").trim();
+  const apiKey = (payload.authSecret || "").trim();
+
+  let extra = "";
+
+  // Write provider config to models.providers
+  const providerCfg = { api: apiType };
+  if (baseUrl) providerCfg.baseUrl = baseUrl;
+  if (apiKey) providerCfg.apiKey = apiKey;
+
+  const providerResult = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "config",
+      "set",
+      "--json",
+      `models.providers.${providerName}`,
+      JSON.stringify(providerCfg),
+    ]),
+  );
+  extra += `[custom-provider] models.providers.${providerName} exit=${providerResult.code}\n`;
+
+  // Write auth profile
+  if (apiKey) {
+    const authProfile = {
+      type: "api_key",
+      provider: providerName,
+      key: apiKey,
+    };
+    const authResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs([
+        "config",
+        "set",
+        "--json",
+        `auth-profiles.profiles.${providerName}:default`,
+        JSON.stringify(authProfile),
+      ]),
+    );
+    extra += `[custom-provider] auth-profiles.${providerName}:default exit=${authResult.code}\n`;
+  }
+
+  // Set model
+  if (modelId) {
+    const fullModel = `${providerName}/${modelId}`;
+    const modelResult = await runCmd(
+      OPENCLAW_NODE,
+      clawArgs(["models", "set", fullModel]),
+    );
+    extra += `[custom-provider] models set ${fullModel} exit=${modelResult.code}\n`;
+    if (modelResult.output) extra += modelResult.output;
+  }
+
+  return extra;
+}
+
 function validatePayload(payload) {
-if (payload.authChoice && !VALID_AUTH_CHOICES.includes(payload.authChoice)) {
+  if (payload.authChoice && !VALID_AUTH_CHOICES.includes(payload.authChoice)) {
     return `Invalid authChoice: ${payload.authChoice}`;
   }
   const stringFields = [
@@ -564,11 +728,21 @@ if (payload.authChoice && !VALID_AUTH_CHOICES.includes(payload.authChoice)) {
     "slackAppToken",
     "authSecret",
     "model",
+    "customProviderName",
+    "customBaseUrl",
+    "customApiType",
+    "customModelId",
   ];
   for (const field of stringFields) {
     if (payload[field] !== undefined && typeof payload[field] !== "string") {
       return `Invalid ${field}: must be a string`;
     }
+  }
+  if (
+    payload.customApiType &&
+    !["openai-completions", "anthropic"].includes(payload.customApiType)
+  ) {
+    return `Invalid customApiType: must be "openai-completions" or "anthropic"`;
   }
   return null;
 }
@@ -637,7 +811,10 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       );
       extra += `[config] gateway.trustedProxies exit=${proxiesResult.code}\n`;
 
-      if (payload.model?.trim()) {
+      if (isCustomProvider(payload.authChoice)) {
+        extra += "\n[setup] Configuring custom provider...\n";
+        extra += await configureCustomProvider(payload);
+      } else if (payload.model?.trim()) {
         extra += `[setup] Setting model to ${payload.model.trim()}...\n`;
         const modelResult = await runCmd(
           OPENCLAW_NODE,
