@@ -31,6 +31,10 @@
       slackAppToken: '',
       log: '',
       loading: false,
+      previewing: false,
+      previewResult: null,
+      previewError: '',
+      previewPayloadSignature: '',
       pairingChannel: '',
       pairingCode: '',
       showPairingModal: false,
@@ -43,6 +47,7 @@
       devices: [],
       devicesPending: [],
       devicesPaired: [],
+      navError: '',
       devicesPoller: null,
       devicesRequestInFlight: false,
       envProvider: {
@@ -86,8 +91,8 @@
           dangerZoneDesc: 'Destructive actions that cannot be undone',
           resetSetup: 'Reset Setup',
           resetSetupDesc: 'Deletes the config file so you can run onboarding again from scratch.',
-          step1Title: 'Model & Authentication',
-          step1Desc: 'Choose your AI provider and authentication method',
+          step1Title: 'Providers',
+          step1Desc: 'Configure at least one provider before continuing',
           providerGroup: 'Provider Group',
           authMethod: 'Auth Method',
           apiKeyToken: 'API Key / Token',
@@ -169,6 +174,17 @@
           envProviderInvalid: 'Environment variable validation failed',
           envProviderAllowed: 'Allowed AI_PROVIDER values',
           envProviderFixHint: 'Please update Railway Variables and redeploy/restart if needed.',
+          providerRequiredNext: 'Configure at least one provider (with model) before continuing.',
+          previewBtn: 'Preview File Changes',
+          previewTitle: 'Planned File Changes',
+          previewDesc: 'Preview files that setup will modify before running.',
+          previewBlocked: 'Setup is already configured. Reset setup first to apply onboarding again.',
+          previewNone: 'No file changes are predicted from current inputs.',
+          previewFailed: 'Failed to generate preview',
+          previewGeneratedAt: 'Generated at',
+          previewOpenclawVersion: 'OpenClaw version',
+          previewChangedFiles: 'Changed files',
+          previewReason: 'Reason',
         },
         zh: {
           title: '个人 AI 助手',
@@ -197,8 +213,8 @@
           dangerZoneDesc: '不可撤销的破坏性操作',
           resetSetup: '重置设置',
           resetSetupDesc: '删除配置文件，以便重新运行初始化。',
-          step1Title: '模型与认证',
-          step1Desc: '选择你的 AI 提供商和认证方式',
+          step1Title: 'Provider',
+          step1Desc: '继续前请至少配置一个 Provider（含模型）',
           providerGroup: '提供商',
           authMethod: '认证方式',
           apiKeyToken: 'API Key / Token',
@@ -279,6 +295,17 @@
           envProviderInvalid: '环境变量校验失败',
           envProviderAllowed: 'AI_PROVIDER 可选值',
           envProviderFixHint: '请在 Railway 的 Variables 中修正后，必要时重新部署/重启。',
+          providerRequiredNext: '继续前请至少配置一个 Provider（含模型）。',
+          previewBtn: '预览文件改动',
+          previewTitle: '即将发生的文件改动',
+          previewDesc: '在运行 setup 前，先预览会被修改的文件。',
+          previewBlocked: '当前已完成配置。若要再次运行 onboarding，请先重置 setup。',
+          previewNone: '根据当前输入，未预测到文件改动。',
+          previewFailed: '生成预览失败',
+          previewGeneratedAt: '生成时间',
+          previewOpenclawVersion: 'OpenClaw 版本',
+          previewChangedFiles: '改动文件数',
+          previewReason: '原因',
         },
       },
 
@@ -303,6 +330,14 @@
           if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
             return false;
           }
+        }
+        return true;
+      },
+
+      get canGoNext() {
+        if (this.step >= this.totalSteps) return false;
+        if (this.step === 1) {
+          return this.isProviderStepValid();
         }
         return true;
       },
@@ -466,6 +501,26 @@
         return model ? `${base} (${model})` : base;
       },
 
+      isProviderStepValid() {
+        if (!Array.isArray(this.providers) || this.providers.length === 0) return false;
+        for (const p of this.providers) {
+          const group = String(p.selectedGroup || '').trim();
+          const model = this.getProviderModelValue(p);
+          if (!group || !model) continue;
+          if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
+            continue;
+          }
+          return true;
+        }
+        return false;
+      },
+
+      ensureProviderStepValid() {
+        const ok = this.isProviderStepValid();
+        this.navError = ok ? '' : this.t('providerRequiredNext');
+        return ok;
+      },
+
       addAgent() {
         this.agents.push({
           id: this.newId('agent'),
@@ -509,22 +564,7 @@
         agent.model = selected ? selected.model : '';
       },
 
-      nextStep() {
-        if (this.step < this.totalSteps) this.step++;
-      },
-
-      prevStep() {
-        if (this.step > 1) this.step--;
-      },
-
-      async runSetup() {
-        for (const p of this.providers) {
-          if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
-            this.log += '\n[ProviderFromEnv] ' + ((this.envProvider && this.envProvider.error) || 'Invalid provider env variables') + '\n';
-            return;
-          }
-        }
-
+      buildSetupPayload() {
         const providerPayload = this.providers.map(p => ({
           id: p.id,
           authChoice: p.selectedAuth,
@@ -558,6 +598,115 @@
           payload.customBaseUrl = providerPayload[0].customBaseUrl;
           payload.customApiType = providerPayload[0].customApiType;
           payload.customModelId = providerPayload[0].customModelId;
+        }
+
+        return payload;
+      },
+
+      payloadSignature(payload) {
+        return JSON.stringify(payload);
+      },
+
+      async previewChanges(payloadOverride = null, options = {}) {
+        if (this.previewing) return false;
+
+        const payload = payloadOverride || this.buildSetupPayload();
+        const signature = this.payloadSignature(payload);
+        const force = Boolean(options.force);
+        const suppressLog = Boolean(options.suppressLog);
+
+        if (!force && this.previewResult && this.previewPayloadSignature === signature) {
+          return true;
+        }
+
+        for (const p of this.providers) {
+          if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
+            const msg = '[ProviderFromEnv] ' + ((this.envProvider && this.envProvider.error) || 'Invalid provider env variables');
+            this.previewError = msg;
+            if (!suppressLog) this.log += '\n' + msg + '\n';
+            return false;
+          }
+        }
+
+        this.previewing = true;
+        this.previewError = '';
+
+        try {
+          const res = await fetch('/setup/api/preview', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const text = await res.text();
+          let j;
+          try { j = JSON.parse(text); } catch (_e) { j = { ok: false, error: text || 'invalid response' }; }
+          if (!res.ok || !j.ok) {
+            throw new Error(j.error || j.output || ('HTTP ' + res.status));
+          }
+          this.previewResult = j;
+          this.previewPayloadSignature = signature;
+          if (!suppressLog) {
+            const changed = j.summary && typeof j.summary.changedFiles === 'number' ? j.summary.changedFiles : 0;
+            this.log += '\n[preview] changedFiles=' + changed + '\n';
+          }
+          return true;
+        } catch (e) {
+          const msg = this.t('previewFailed') + ': ' + String(e);
+          this.previewError = msg;
+          if (!suppressLog) this.log += '\n' + msg + '\n';
+          return false;
+        } finally {
+          this.previewing = false;
+        }
+      },
+
+      async ensureStep4Preview(force = false) {
+        if (this.step !== 4) return;
+        if (!this.canRunSetup) return;
+        const payload = this.buildSetupPayload();
+        await this.previewChanges(payload, { force, suppressLog: true });
+      },
+
+      goToStep(targetStep) {
+        const s = Number(targetStep);
+        if (!Number.isInteger(s) || s < 1 || s > this.totalSteps) return;
+        if (s === this.step) return;
+        if (s > this.step && this.step === 1 && !this.ensureProviderStepValid()) return;
+        this.navError = '';
+        this.step = s;
+        if (this.step === 4) {
+          this.ensureStep4Preview().catch(() => {});
+        }
+      },
+
+      nextStep() {
+        if (this.step === 1 && !this.ensureProviderStepValid()) return;
+        this.navError = '';
+        if (this.step < this.totalSteps) this.step++;
+        if (this.step === 4) {
+          this.ensureStep4Preview().catch(() => {});
+        }
+      },
+
+      prevStep() {
+        this.navError = '';
+        if (this.step > 1) this.step--;
+      },
+
+      async runSetup() {
+        for (const p of this.providers) {
+          if (this.isProviderFromEnvFor(p) && !(this.envProvider && this.envProvider.valid)) {
+            this.log += '\n[ProviderFromEnv] ' + ((this.envProvider && this.envProvider.error) || 'Invalid provider env variables') + '\n';
+            return;
+          }
+        }
+
+        const payload = this.buildSetupPayload();
+        const okPreview = await this.previewChanges(payload, { suppressLog: true });
+        if (!okPreview) {
+          this.log += '\n' + this.t('previewFailed') + '\n';
+          return;
         }
 
         this.log = 'Running...\n';
@@ -1048,7 +1197,7 @@
       <div class="flex items-center justify-center gap-2 mb-8">
         <template x-for="s in totalSteps" :key="s">
           <div class="flex items-center">
-            <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-all cursor-pointer" :class="step === s ? 'bg-red-600 text-white' : (step > s ? 'bg-emerald-600 text-white' : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-500')" @click="step = s" x-text="s"></div>
+            <div class="w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium transition-all cursor-pointer" :class="step === s ? 'bg-red-600 text-white' : (step > s ? 'bg-emerald-600 text-white' : 'bg-neutral-200 dark:bg-neutral-800 text-neutral-500')" @click="goToStep(s)" x-text="s"></div>
             <div x-show="s < totalSteps" class="w-12 h-0.5 mx-1" :class="step > s ? 'bg-emerald-600' : 'bg-neutral-200 dark:bg-neutral-800'"></div>
           </div>
         </template>
@@ -1288,6 +1437,57 @@
               </div>
             </dl>
           </div>
+          <div class="bg-amber-50 dark:bg-neutral-800/50 rounded-lg p-4 border border-amber-200 dark:border-neutral-800 mb-6">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <h3 class="text-sm font-medium text-amber-900 dark:text-neutral-200" x-text="t('previewTitle')"></h3>
+              <button @click="previewChanges(null, { force: true })" :disabled="previewing || loading || !canRunSetup" class="bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-3 py-1.5 rounded-lg text-xs font-medium transition-colors">
+                <span x-show="!previewing" x-text="t('previewBtn')"></span>
+                <span x-show="previewing" x-text="t('loading')"></span>
+              </button>
+            </div>
+            <p class="text-xs text-amber-800/80 dark:text-neutral-400 mb-3" x-text="t('previewDesc')"></p>
+            <div x-show="previewError" class="text-xs text-red-700 dark:text-red-300 mb-3 whitespace-pre-wrap" x-text="previewError"></div>
+            <div x-show="previewResult && previewResult.blocked" class="text-xs text-amber-900 dark:text-amber-200 mb-3" x-text="t('previewBlocked')"></div>
+            <div x-show="previewResult && !previewResult.blocked" class="space-y-3">
+              <div class="text-xs text-amber-900 dark:text-neutral-300 space-y-1">
+                <div>
+                  <span x-text="t('previewOpenclawVersion')"></span>
+                  <span>: </span>
+                  <span x-text="previewResult.openclawVersion || openclawVersion || '-'"></span>
+                </div>
+                <div>
+                  <span x-text="t('previewGeneratedAt')"></span>
+                  <span>: </span>
+                  <span x-text="previewResult.generatedAt ? new Date(previewResult.generatedAt).toLocaleString() : '-'"></span>
+                </div>
+                <div>
+                  <span x-text="t('previewChangedFiles')"></span>
+                  <span>: </span>
+                  <span x-text="previewResult.summary && typeof previewResult.summary.changedFiles === 'number' ? previewResult.summary.changedFiles : 0"></span>
+                </div>
+              </div>
+
+              <template x-if="previewResult.notes && previewResult.notes.length">
+                <div class="bg-white/60 dark:bg-neutral-900 border border-amber-200 dark:border-neutral-700 rounded p-2 text-xs text-amber-900 dark:text-neutral-300 whitespace-pre-wrap" x-text="previewResult.notes.join('\n')"></div>
+              </template>
+
+              <div x-show="previewResult.files && previewResult.files.length" class="space-y-2">
+                <template x-for="file in previewResult.files" :key="file.path">
+                  <details class="bg-white/70 dark:bg-neutral-900 border border-amber-200 dark:border-neutral-700 rounded">
+                    <summary class="cursor-pointer px-3 py-2 text-xs font-medium text-amber-900 dark:text-neutral-200 break-all">
+                      <span x-text="file.path"></span>
+                      <span class="text-amber-700 dark:text-neutral-400"> • </span>
+                      <span x-text="t('previewReason')"></span>
+                      <span>: </span>
+                      <span x-text="file.reason || '-'"></span>
+                    </summary>
+                    <pre class="px-3 pb-3 overflow-x-auto text-[11px] leading-5 whitespace-pre-wrap text-amber-950 dark:text-neutral-300" x-text="file.diff || file.after"></pre>
+                  </details>
+                </template>
+              </div>
+              <p x-show="!previewResult.files || previewResult.files.length === 0" class="text-xs text-amber-900 dark:text-neutral-300" x-text="t('previewNone')"></p>
+            </div>
+          </div>
           <div class="flex flex-wrap gap-3 mb-4">
             <button @click="runSetup()" :disabled="loading || !canRunSetup" class="bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-lg font-medium transition-colors">
               <span x-show="!loading" x-text="t('runSetupBtn')"></span>
@@ -1307,11 +1507,12 @@
           <span x-text="t('back')"></span>
         </button>
         <div x-show="step === 1"></div>
-        <button x-show="step < totalSteps" @click="nextStep()" class="flex items-center gap-2 bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 px-5 py-2.5 rounded-lg font-medium transition-colors ml-auto">
+        <button x-show="step < totalSteps" @click="nextStep()" :disabled="!canGoNext" class="flex items-center gap-2 bg-neutral-200 dark:bg-neutral-800 hover:bg-neutral-300 dark:hover:bg-neutral-700 disabled:opacity-50 disabled:cursor-not-allowed text-neutral-800 dark:text-neutral-200 px-5 py-2.5 rounded-lg font-medium transition-colors ml-auto">
           <span x-text="t('next')"></span>
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
         </button>
       </div>
+      <p x-show="navError" class="mt-3 text-sm text-red-600 dark:text-red-400" x-text="navError"></p>
     </div>
 
     <!-- Devices Modal -->

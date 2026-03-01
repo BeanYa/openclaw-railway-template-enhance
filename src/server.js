@@ -1681,6 +1681,549 @@ function validatePayload(payload) {
   return null;
 }
 
+function normalizeSetupPayload(rawPayload = {}) {
+  let payload = rawPayload;
+
+  if (Array.isArray(rawPayload.providers) && rawPayload.providers.length > 0) {
+    const transformedProviders = [];
+    for (const provider of rawPayload.providers) {
+      const p = provider || {};
+      if (p.authChoice === "provider-from-env") {
+        const transformed = buildPayloadFromEnvProvider(p);
+        if (!transformed.ok) {
+          return { ok: false, error: transformed.error };
+        }
+        transformedProviders.push({ ...p, ...transformed.payload });
+      } else {
+        transformedProviders.push(p);
+      }
+    }
+    const firstProvider = transformedProviders[0] || {};
+    payload = {
+      ...rawPayload,
+      providers: transformedProviders,
+      authChoice: firstProvider.authChoice || rawPayload.authChoice,
+      authSecret: firstProvider.authSecret || rawPayload.authSecret,
+      model: firstProvider.model || rawPayload.model,
+      customProviderName:
+        firstProvider.customProviderName || rawPayload.customProviderName,
+      customBaseUrl: firstProvider.customBaseUrl || rawPayload.customBaseUrl,
+      customApiType: firstProvider.customApiType || rawPayload.customApiType,
+      customModelId: firstProvider.customModelId || rawPayload.customModelId,
+    };
+  } else if (rawPayload.authChoice === "provider-from-env") {
+    const transformed = buildPayloadFromEnvProvider(rawPayload);
+    if (!transformed.ok) {
+      return { ok: false, error: transformed.error };
+    }
+    payload = transformed.payload;
+  }
+
+  return { ok: true, payload };
+}
+
+function buildProviderEntries(payload) {
+  return Array.isArray(payload.providers) && payload.providers.length > 0
+    ? payload.providers.map((p, idx) => ({
+        ...p,
+        id: String(p.id || `provider-${idx + 1}`),
+        model: String(p.model || "").trim(),
+      }))
+    : [{ ...payload, id: "provider-1", model: String(payload.model || "").trim() }];
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function ensureObjectField(obj, key) {
+  if (!isPlainObject(obj[key])) {
+    obj[key] = {};
+  }
+  return obj[key];
+}
+
+function normalizeText(value) {
+  return String(value || "").replace(/\r\n/g, "\n");
+}
+
+function jsonText(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function parseJsonObjectText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return { value: {}, error: null };
+  try {
+    const parsed = JSON.parse(raw);
+    if (!isPlainObject(parsed)) {
+      return { value: {}, error: "json-root-is-not-object" };
+    }
+    return { value: parsed, error: null };
+  } catch (err) {
+    return { value: {}, error: err.message || "json-parse-error" };
+  }
+}
+
+function buildUnifiedLineDiff(beforeText, afterText) {
+  const beforeLines = normalizeText(beforeText).split("\n");
+  const afterLines = normalizeText(afterText).split("\n");
+  const complexity = beforeLines.length * afterLines.length;
+  if (complexity > 250_000) {
+    return [
+      "--- current",
+      "+++ preview",
+      `@@ large file: ${beforeLines.length} -> ${afterLines.length} lines @@`,
+      "[diff omitted because content is too large]",
+    ].join("\n");
+  }
+
+  const dp = Array.from({ length: beforeLines.length + 1 }, () =>
+    Array(afterLines.length + 1).fill(0),
+  );
+
+  for (let i = 1; i <= beforeLines.length; i += 1) {
+    for (let j = 1; j <= afterLines.length; j += 1) {
+      if (beforeLines[i - 1] === afterLines[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  const ops = [];
+  let i = beforeLines.length;
+  let j = afterLines.length;
+
+  while (i > 0 && j > 0) {
+    if (beforeLines[i - 1] === afterLines[j - 1]) {
+      ops.push({ type: " ", line: beforeLines[i - 1] });
+      i -= 1;
+      j -= 1;
+      continue;
+    }
+    if (dp[i - 1][j] >= dp[i][j - 1]) {
+      ops.push({ type: "-", line: beforeLines[i - 1] });
+      i -= 1;
+    } else {
+      ops.push({ type: "+", line: afterLines[j - 1] });
+      j -= 1;
+    }
+  }
+  while (i > 0) {
+    ops.push({ type: "-", line: beforeLines[i - 1] });
+    i -= 1;
+  }
+  while (j > 0) {
+    ops.push({ type: "+", line: afterLines[j - 1] });
+    j -= 1;
+  }
+
+  ops.reverse();
+  const lines = ["--- current", "+++ preview"];
+  for (const op of ops) {
+    lines.push(`${op.type}${op.line}`);
+  }
+  return lines.join("\n");
+}
+
+function buildFilePreviewEntry({ filePath, beforeText, afterText, reason }) {
+  const before = normalizeText(beforeText ?? "");
+  const after = normalizeText(afterText ?? "");
+  const changed = before !== after;
+  return {
+    path: filePath,
+    reason,
+    existsBefore: beforeText != null,
+    changed,
+    diff: changed ? buildUnifiedLineDiff(before, after) : "",
+    before,
+    after,
+  };
+}
+
+function deriveProviderPreviewMeta(entry = {}) {
+  const apiKey = String(entry.authSecret || "").trim();
+  if (isCustomProvider(entry.authChoice)) {
+    const providerName =
+      entry.authChoice === "custom-provider"
+        ? (entry.customProviderName || "custom").trim() || "custom"
+        : String(entry.authChoice || "").trim() || "custom";
+    const rawApiType = (entry.customApiType || "openai-completions").trim();
+    const apiType =
+      rawApiType === "anthropic" ? "anthropic-messages" : rawApiType;
+    return {
+      isCustom: true,
+      providerName,
+      profileId: `${providerName}:default`,
+      apiKey,
+      baseUrl: String(entry.customBaseUrl || "").trim(),
+      apiType,
+      modelId: String(entry.customModelId || "").trim(),
+    };
+  }
+
+  const providerName = inferProviderName(entry);
+  return {
+    isCustom: false,
+    providerName,
+    profileId: `${providerName}:default`,
+    apiKey,
+    baseUrl: "",
+    apiType: "",
+    modelId: "",
+  };
+}
+
+function applyGatewayPreviewToConfig(cfg) {
+  const gateway = ensureObjectField(cfg, "gateway");
+  const controlUi = ensureObjectField(gateway, "controlUi");
+  const auth = ensureObjectField(gateway, "auth");
+  controlUi.allowInsecureAuth = true;
+  auth.token = OPENCLAW_GATEWAY_TOKEN;
+  gateway.trustedProxies = ["127.0.0.1"];
+}
+
+function applyProviderPreviewToConfig(cfg, providerEntries) {
+  const authUpdates = [];
+  let hasCustomProvider = false;
+
+  for (const provider of providerEntries) {
+    const meta = deriveProviderPreviewMeta(provider);
+
+    if (meta.isCustom) {
+      hasCustomProvider = true;
+      const models = ensureObjectField(cfg, "models");
+      const providers = ensureObjectField(models, "providers");
+      const providerCfg = { api: meta.apiType };
+      if (meta.baseUrl) providerCfg.baseUrl = meta.baseUrl;
+      if (meta.apiKey) providerCfg.apiKey = meta.apiKey;
+      if (meta.modelId) {
+        providerCfg.models = [{ id: meta.modelId, name: meta.modelId }];
+      }
+      providers[meta.providerName] = providerCfg;
+
+      if (isPlainObject(cfg.auth)) {
+        if (
+          isPlainObject(cfg.auth.profiles) &&
+          cfg.auth.profiles["openai:default"] !== undefined
+        ) {
+          delete cfg.auth.profiles["openai:default"];
+        }
+        if (isPlainObject(cfg.auth.order) && cfg.auth.order.openai !== undefined) {
+          delete cfg.auth.order.openai;
+        }
+      }
+    }
+
+    if (meta.apiKey) {
+      const auth = ensureObjectField(cfg, "auth");
+      const profiles = ensureObjectField(auth, "profiles");
+      const order = ensureObjectField(auth, "order");
+      profiles[meta.profileId] = {
+        provider: meta.providerName,
+        mode: "api_key",
+      };
+      order[meta.providerName] = [meta.profileId];
+      authUpdates.push({
+        providerName: meta.providerName,
+        profileId: meta.profileId,
+        apiKey: meta.apiKey,
+      });
+    }
+  }
+
+  return { authUpdates, hasCustomProvider };
+}
+
+function applyAgentsPreviewToConfig(cfg, agents) {
+  const agentsRoot = ensureObjectField(cfg, "agents");
+  const defaults = ensureObjectField(agentsRoot, "defaults");
+  const previousModels = isPlainObject(defaults.models) ? defaults.models : {};
+
+  const nextModelMap = {};
+  for (const agent of agents) {
+    nextModelMap[agent.name] = agent.model;
+  }
+
+  let primaryModel = String(nextModelMap.primary || "").trim();
+  if (!primaryModel && agents[0]) {
+    primaryModel = String(agents[0].model || "").trim();
+    if (primaryModel) nextModelMap.primary = primaryModel;
+  }
+
+  const nextModels = {};
+  for (const model of new Set(Object.values(nextModelMap).filter(Boolean))) {
+    const existing = previousModels[model];
+    nextModels[model] =
+      existing && isPlainObject(existing)
+        ? JSON.parse(JSON.stringify(existing))
+        : {};
+  }
+
+  defaults.model = nextModelMap;
+  defaults.models = nextModels;
+  return { primaryModel };
+}
+
+function applyChannelsPreviewToConfig(cfg, payload) {
+  let channels = null;
+  function getChannels() {
+    if (!channels) {
+      channels = ensureObjectField(cfg, "channels");
+    }
+    return channels;
+  }
+  if (payload.telegramToken?.trim()) {
+    getChannels().telegram = {
+      enabled: true,
+      dmPolicy: "pairing",
+      botToken: payload.telegramToken.trim(),
+      groupPolicy: "allowlist",
+      streamMode: "partial",
+    };
+  }
+
+  if (payload.discordToken?.trim()) {
+    getChannels().discord = {
+      enabled: true,
+      token: payload.discordToken.trim(),
+      groupPolicy: "allowlist",
+      dm: { policy: "pairing" },
+    };
+  }
+
+  if (payload.slackBotToken?.trim() || payload.slackAppToken?.trim()) {
+    getChannels().slack = {
+      enabled: true,
+      botToken: payload.slackBotToken?.trim() || undefined,
+      appToken: payload.slackAppToken?.trim() || undefined,
+    };
+  }
+}
+
+function simulateAuthProfileStore(beforeStore, authUpdates) {
+  const store =
+    beforeStore && isPlainObject(beforeStore)
+      ? JSON.parse(JSON.stringify(beforeStore))
+      : {};
+  let changed = false;
+
+  if (!isPlainObject(store.profiles)) {
+    store.profiles = {};
+  }
+
+  for (const [id, profile] of Object.entries(store.profiles)) {
+    const p = profile || {};
+    const pKey = typeof p.key === "string" ? p.key : "";
+    const isPlaceholder =
+      pKey.includes(CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY) ||
+      pKey.includes("placeholder-for-custom-provider");
+    if (id === "openai:default" || isPlaceholder) {
+      delete store.profiles[id];
+      changed = true;
+    }
+  }
+
+  for (const update of authUpdates) {
+    if (!update.apiKey) continue;
+    const nextProfile = {
+      type: "api_key",
+      provider: update.providerName,
+      key: update.apiKey,
+    };
+    const previous = store.profiles[update.profileId];
+    if (JSON.stringify(previous) !== JSON.stringify(nextProfile)) {
+      store.profiles[update.profileId] = nextProfile;
+      changed = true;
+    }
+  }
+
+  if (isPlainObject(store.usageStats)) {
+    for (const usageId of Object.keys(store.usageStats)) {
+      if (!store.profiles[usageId]) {
+        delete store.usageStats[usageId];
+        changed = true;
+      }
+    }
+  }
+
+  return { store, changed };
+}
+
+function previewSanitizeBootstrapOpenAIEnvContent(beforeText) {
+  const original = normalizeText(beforeText);
+  const lines = original.split(/\n/);
+  let removed = 0;
+  const kept = [];
+
+  for (const line of lines) {
+    if (
+      /^\s*OPENAI_API_KEY\s*=/.test(line) &&
+      line.includes(CUSTOM_PROVIDER_BOOTSTRAP_OPENAI_KEY)
+    ) {
+      removed += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+
+  const after = `${kept.join("\n").replace(/\n+$/, "")}\n`;
+  return { changed: removed > 0, removed, afterText: after };
+}
+
+function generateSetupPreview(payload) {
+  const notes = [
+    "Preview is based on wrapper-level config logic; openclaw onboard may add extra defaults.",
+    "No files are modified by this preview.",
+  ];
+  const files = [];
+  const cfgPath = configPath();
+  const providerEntries = buildProviderEntries(payload);
+  const normalizedAgents = normalizeAgentsFromPayload(payload.agents, providerEntries);
+
+  let cfgBeforeText = null;
+  let cfgBeforeObj = {};
+  if (fs.existsSync(cfgPath)) {
+    try {
+      cfgBeforeText = fs.readFileSync(cfgPath, "utf8");
+      const parsed = parseJsonObjectText(cfgBeforeText);
+      cfgBeforeObj = parsed.value;
+      if (parsed.error) {
+        notes.push(`Warning: could not parse existing config ${cfgPath}: ${parsed.error}`);
+      }
+    } catch (err) {
+      notes.push(`Warning: could not read config ${cfgPath}: ${err.message}`);
+    }
+  }
+
+  const cfgPreview = JSON.parse(JSON.stringify(cfgBeforeObj || {}));
+  applyGatewayPreviewToConfig(cfgPreview);
+  const providerPreview = applyProviderPreviewToConfig(cfgPreview, providerEntries);
+  applyAgentsPreviewToConfig(cfgPreview, normalizedAgents);
+  applyChannelsPreviewToConfig(cfgPreview, payload);
+
+  const cfgFilePreview = buildFilePreviewEntry({
+    filePath: cfgPath,
+    beforeText: cfgBeforeText,
+    afterText: jsonText(cfgPreview),
+    reason: "openclaw main config",
+  });
+  if (cfgFilePreview.changed) files.push(cfgFilePreview);
+
+  const authStorePaths = listAuthProfileStorePaths();
+  for (const storePath of authStorePaths) {
+    let beforeText = null;
+    let beforeStore = {};
+
+    if (fs.existsSync(storePath)) {
+      try {
+        beforeText = fs.readFileSync(storePath, "utf8");
+        const parsed = parseJsonObjectText(beforeText);
+        beforeStore = parsed.value;
+        if (parsed.error) {
+          notes.push(`Warning: could not parse auth store ${storePath}: ${parsed.error}`);
+        }
+      } catch (err) {
+        notes.push(`Warning: could not read auth store ${storePath}: ${err.message}`);
+      }
+    }
+
+    const simulated = simulateAuthProfileStore(beforeStore, providerPreview.authUpdates);
+    if (!simulated.changed) continue;
+
+    const storePreview = buildFilePreviewEntry({
+      filePath: storePath,
+      beforeText,
+      afterText: jsonText(simulated.store),
+      reason: "auth profile store",
+    });
+    if (storePreview.changed) files.push(storePreview);
+  }
+
+  if (providerPreview.hasCustomProvider) {
+    const envPath = path.join(STATE_DIR, ".env");
+    if (fs.existsSync(envPath)) {
+      try {
+        const envBefore = fs.readFileSync(envPath, "utf8");
+        const envPreview = previewSanitizeBootstrapOpenAIEnvContent(envBefore);
+        if (envPreview.changed) {
+          const envFilePreview = buildFilePreviewEntry({
+            filePath: envPath,
+            beforeText: envBefore,
+            afterText: envPreview.afterText,
+            reason: "bootstrap OPENAI_API_KEY cleanup",
+          });
+          if (envFilePreview.changed) files.push(envFilePreview);
+        }
+      } catch (err) {
+        notes.push(`Warning: could not read env file ${envPath}: ${err.message}`);
+      }
+    }
+  }
+
+  return {
+    notes,
+    files,
+    summary: {
+      providers: providerEntries.length,
+      agents: normalizedAgents.length,
+      changedFiles: files.length,
+      channels: [
+        payload.telegramToken?.trim() ? "telegram" : "",
+        payload.discordToken?.trim() ? "discord" : "",
+        payload.slackBotToken?.trim() || payload.slackAppToken?.trim() ? "slack" : "",
+      ].filter(Boolean),
+    },
+  };
+}
+
+app.post("/setup/api/preview", requireSetupAuth, async (req, res) => {
+  try {
+    const { version } = await getOpenclawInfo();
+    if (isConfigured()) {
+      return res.json({
+        ok: true,
+        configured: true,
+        blocked: true,
+        openclawVersion: version,
+        notes: [
+          "Instance is already configured. /setup/api/run will not apply setup again unless you reset first.",
+        ],
+        files: [],
+        summary: { providers: 0, agents: 0, changedFiles: 0, channels: [] },
+      });
+    }
+
+    const normalized = normalizeSetupPayload(req.body || {});
+    if (!normalized.ok) {
+      return res.status(400).json({ ok: false, error: normalized.error });
+    }
+
+    const payload = normalized.payload;
+    const validationError = validatePayload(payload);
+    if (validationError) {
+      return res.status(400).json({ ok: false, error: validationError });
+    }
+
+    const preview = generateSetupPreview(payload);
+    return res.json({
+      ok: true,
+      configured: false,
+      blocked: false,
+      openclawVersion: version,
+      generatedAt: new Date().toISOString(),
+      ...preview,
+    });
+  } catch (err) {
+    console.error("[/setup/api/preview] error:", err);
+    return res
+      .status(500)
+      .json({ ok: false, error: `Internal error: ${String(err)}` });
+  }
+});
+
 app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
   try {
     if (isConfigured()) {
@@ -1695,43 +2238,11 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
-    const rawPayload = req.body || {};
-    let payload = rawPayload;
-
-    if (Array.isArray(rawPayload.providers) && rawPayload.providers.length > 0) {
-      const transformedProviders = [];
-      for (const provider of rawPayload.providers) {
-        const p = provider || {};
-        if (p.authChoice === "provider-from-env") {
-          const transformed = buildPayloadFromEnvProvider(p);
-          if (!transformed.ok) {
-            return res.status(400).json({ ok: false, output: transformed.error });
-          }
-          transformedProviders.push({ ...p, ...transformed.payload });
-        } else {
-          transformedProviders.push(p);
-        }
-      }
-      const firstProvider = transformedProviders[0] || {};
-      payload = {
-        ...rawPayload,
-        providers: transformedProviders,
-        authChoice: firstProvider.authChoice || rawPayload.authChoice,
-        authSecret: firstProvider.authSecret || rawPayload.authSecret,
-        model: firstProvider.model || rawPayload.model,
-        customProviderName:
-          firstProvider.customProviderName || rawPayload.customProviderName,
-        customBaseUrl: firstProvider.customBaseUrl || rawPayload.customBaseUrl,
-        customApiType: firstProvider.customApiType || rawPayload.customApiType,
-        customModelId: firstProvider.customModelId || rawPayload.customModelId,
-      };
-    } else if (rawPayload.authChoice === "provider-from-env") {
-      const transformed = buildPayloadFromEnvProvider(rawPayload);
-      if (!transformed.ok) {
-        return res.status(400).json({ ok: false, output: transformed.error });
-      }
-      payload = transformed.payload;
+    const normalized = normalizeSetupPayload(req.body || {});
+    if (!normalized.ok) {
+      return res.status(400).json({ ok: false, output: normalized.error });
     }
+    const payload = normalized.payload;
 
     const validationError = validatePayload(payload);
     if (validationError) {
@@ -1808,14 +2319,7 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
       );
       extra += `[config] gateway.trustedProxies exit=${proxiesResult.code}\n`;
 
-      const providerEntries =
-        Array.isArray(payload.providers) && payload.providers.length > 0
-          ? payload.providers.map((p, idx) => ({
-              ...p,
-              id: String(p.id || `provider-${idx + 1}`),
-              model: String(p.model || "").trim(),
-            }))
-          : [{ ...payload, id: "provider-1", model: String(payload.model || "").trim() }];
+      const providerEntries = buildProviderEntries(payload);
       extra += `\n[setup] Configuring ${providerEntries.length} provider(s)...\n`;
 
       for (let i = 0; i < providerEntries.length; i++) {
