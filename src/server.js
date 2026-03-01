@@ -791,6 +791,95 @@ function syncAuthProfileStores({ providerName, profileId, apiKey }) {
   };
 }
 
+function sanitizeDefaultModelEntries({ providerName, modelId }) {
+  const cfgPath = configPath();
+  if (!fs.existsSync(cfgPath)) {
+    return { ok: true, changed: false, removed: 0, reason: "config-not-found" };
+  }
+
+  const fullModel =
+    providerName && modelId ? `${providerName}/${modelId}` : null;
+
+  try {
+    const raw = fs.readFileSync(cfgPath, "utf8");
+    const cfg = raw.trim() ? JSON.parse(raw) : {};
+    if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+      return { ok: false, changed: false, removed: 0, reason: "invalid-config-json" };
+    }
+
+    if (!cfg.agents || typeof cfg.agents !== "object" || Array.isArray(cfg.agents)) {
+      cfg.agents = {};
+    }
+    if (
+      !cfg.agents.defaults ||
+      typeof cfg.agents.defaults !== "object" ||
+      Array.isArray(cfg.agents.defaults)
+    ) {
+      cfg.agents.defaults = {};
+    }
+
+    let changed = false;
+    let removed = 0;
+
+    if (fullModel) {
+      if (
+        !cfg.agents.defaults.model ||
+        typeof cfg.agents.defaults.model !== "object" ||
+        Array.isArray(cfg.agents.defaults.model)
+      ) {
+        cfg.agents.defaults.model = {};
+      }
+      if (cfg.agents.defaults.model.primary !== fullModel) {
+        cfg.agents.defaults.model.primary = fullModel;
+        changed = true;
+      }
+    }
+
+    const currentModels =
+      cfg.agents.defaults.models &&
+      typeof cfg.agents.defaults.models === "object" &&
+      !Array.isArray(cfg.agents.defaults.models)
+        ? cfg.agents.defaults.models
+        : {};
+
+    const nextModels = {};
+    if (fullModel) {
+      const existingMain = currentModels[fullModel];
+      nextModels[fullModel] =
+        existingMain && typeof existingMain === "object" && !Array.isArray(existingMain)
+          ? existingMain
+          : {};
+    }
+
+    for (const [key, value] of Object.entries(currentModels)) {
+      if (key === fullModel) continue;
+      if (key.startsWith("openai/")) {
+        removed += 1;
+        changed = true;
+        continue;
+      }
+      nextModels[key] = value;
+    }
+
+    if (JSON.stringify(nextModels) !== JSON.stringify(currentModels)) {
+      cfg.agents.defaults.models = nextModels;
+      changed = true;
+    }
+
+    if (!changed) {
+      return { ok: true, changed: false, removed, reason: "no-change" };
+    }
+
+    fs.writeFileSync(cfgPath, `${JSON.stringify(cfg, null, 2)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    return { ok: true, changed: true, removed, reason: "updated" };
+  } catch {
+    return { ok: false, changed: false, removed: 0, reason: "parse-or-write-error" };
+  }
+}
+
 async function configureCustomProvider(payload) {
   const providerName =
     payload.authChoice === "custom-provider"
@@ -907,6 +996,15 @@ async function configureCustomProvider(payload) {
     if (modelResult.output) extra += modelResult.output;
     if (modelResult.code !== 0) ok = false;
   }
+
+  const sanitizeModelsResult = sanitizeDefaultModelEntries({
+    providerName,
+    modelId,
+  });
+  extra +=
+    `[custom-provider] sanitize agents.defaults.models changed=${sanitizeModelsResult.changed} ` +
+    `removed=${sanitizeModelsResult.removed} reason=${sanitizeModelsResult.reason}\n`;
+  if (!sanitizeModelsResult.ok) ok = false;
 
   return { ok, output: extra };
 }
