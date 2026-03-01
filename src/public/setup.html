@@ -46,6 +46,8 @@
       devices: [],
       devicesPending: [],
       devicesPaired: [],
+      devicesPoller: null,
+      devicesRequestInFlight: false,
       // Custom provider fields
       customProviderName: '',
       customBaseUrl: '',
@@ -248,10 +250,14 @@
 
       async init() {
         await this.refreshStatus();
+        window.addEventListener('beforeunload', () => this.stopDevicesPolling());
       },
 
       async httpJson(url, opts = {}) {
         opts.credentials = 'same-origin';
+        if (!opts.cache) {
+          opts.cache = 'no-store';
+        }
         const res = await fetch(url, opts);
         if (!res.ok) {
           const t = await res.text();
@@ -476,32 +482,170 @@
       async openDevicesModal() {
         this.showDevicesModal = true;
         await this.loadDevices();
+        this.startDevicesPolling();
       },
 
-      async loadDevices() {
-        this.devicesLoading = true;
-        try {
-          const j = await this.httpJson('/setup/api/devices');
-          const d = j.data;
-          if (d) {
-            if (Array.isArray(d)) {
-              this.devicesPending = d.filter(x => x.status === 'pending');
-              this.devicesPaired = d.filter(x => x.status !== 'pending');
-            } else {
-              this.devicesPending = d.pending || d.pendingRequests || d.requests || [];
-              this.devicesPaired = d.devices || d.paired || d.approved || [];
-            }
-          } else {
-            this.devicesPending = [];
-            this.devicesPaired = [];
+      closeDevicesModal() {
+        this.showDevicesModal = false;
+        this.stopDevicesPolling();
+      },
+
+      startDevicesPolling() {
+        this.stopDevicesPolling();
+        this.devicesPoller = setInterval(() => {
+          if (this.showDevicesModal && !this.devicesRequestInFlight) {
+            this.loadDevices({ silent: true });
           }
-          if (j.raw) {
+        }, 1500);
+      },
+
+      stopDevicesPolling() {
+        if (this.devicesPoller) {
+          clearInterval(this.devicesPoller);
+          this.devicesPoller = null;
+        }
+      },
+
+      normalizeDeviceLists(data) {
+        const pending = [];
+        const paired = [];
+        const pendingKeys = new Set();
+        const pairedKeys = new Set();
+        const pendingStatuses = new Set(['pending', 'requested', 'requesting', 'awaiting', 'waiting', 'unapproved']);
+        const approvedStatuses = new Set(['approved', 'paired', 'active', 'connected']);
+
+        function normalizeEntry(entry) {
+          if (!entry || typeof entry !== 'object') return null;
+          const normalized = { ...entry };
+          if (normalized.requestId == null && normalized.request_id != null) normalized.requestId = normalized.request_id;
+          if (normalized.deviceId == null && normalized.device_id != null) normalized.deviceId = normalized.device_id;
+          if (normalized.createdAt == null && normalized.created_at != null) normalized.createdAt = normalized.created_at;
+          return normalized;
+        }
+
+        function getKey(entry, prefix) {
+          const id = entry.requestId ?? entry.deviceId ?? entry.id ?? entry.request_id ?? entry.device_id;
+          return prefix + ':' + (id == null ? JSON.stringify(entry) : String(id));
+        }
+
+        function pushUnique(list, keySet, entry, prefix) {
+          const key = getKey(entry, prefix);
+          if (keySet.has(key)) return;
+          keySet.add(key);
+          list.push(entry);
+        }
+
+        function looksLikeDeviceEntry(value) {
+          if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+          return (
+            Object.prototype.hasOwnProperty.call(value, 'requestId') ||
+            Object.prototype.hasOwnProperty.call(value, 'request_id') ||
+            Object.prototype.hasOwnProperty.call(value, 'deviceId') ||
+            Object.prototype.hasOwnProperty.call(value, 'device_id') ||
+            (
+              Object.prototype.hasOwnProperty.call(value, 'id') &&
+              (
+                Object.prototype.hasOwnProperty.call(value, 'status') ||
+                Object.prototype.hasOwnProperty.call(value, 'state') ||
+                Object.prototype.hasOwnProperty.call(value, 'createdAt') ||
+                Object.prototype.hasOwnProperty.call(value, 'created_at')
+              )
+            )
+          );
+        }
+
+        function getContextByKey(key) {
+          const lower = String(key || '').toLowerCase();
+          if (lower.includes('pending') || lower.includes('request')) return 'pending';
+          if (lower.includes('paired') || lower.includes('approved') || lower === 'devices' || lower.includes('device')) return 'paired';
+          return '';
+        }
+
+        function classify(entry, context) {
+          const normalized = normalizeEntry(entry);
+          if (!normalized) return;
+          const status = String(normalized.status ?? normalized.state ?? '').toLowerCase();
+          if (context === 'pending' || pendingStatuses.has(status)) {
+            pushUnique(pending, pendingKeys, normalized, 'pending');
+            return;
+          }
+          if (context === 'paired' || approvedStatuses.has(status)) {
+            pushUnique(paired, pairedKeys, normalized, 'paired');
+            return;
+          }
+          if (normalized.requestId && !normalized.deviceId) {
+            pushUnique(pending, pendingKeys, normalized, 'pending');
+            return;
+          }
+          pushUnique(paired, pairedKeys, normalized, 'paired');
+        }
+
+        function walk(node, context) {
+          if (!node) return;
+
+          if (Array.isArray(node)) {
+            for (const item of node) {
+              if (looksLikeDeviceEntry(item)) {
+                classify(item, context);
+              } else {
+                walk(item, context);
+              }
+            }
+            return;
+          }
+
+          if (typeof node !== 'object') return;
+
+          if (looksLikeDeviceEntry(node)) {
+            classify(node, context);
+            return;
+          }
+
+          for (const [key, val] of Object.entries(node)) {
+            const nextContext = getContextByKey(key) || context;
+            walk(val, nextContext);
+          }
+        }
+
+        walk(data, '');
+
+        function toTs(entry) {
+          const ts = Date.parse(String(entry.createdAt ?? ''));
+          return Number.isNaN(ts) ? 0 : ts;
+        }
+        pending.sort((a, b) => toTs(b) - toTs(a));
+        paired.sort((a, b) => toTs(b) - toTs(a));
+
+        return { pending, paired };
+      },
+
+      async loadDevices(opts = {}) {
+        const silent = Boolean(opts.silent);
+        if (this.devicesRequestInFlight) return;
+        this.devicesRequestInFlight = true;
+        if (!silent) {
+          this.devicesLoading = true;
+        }
+        try {
+          const j = await this.httpJson('/setup/api/devices?ts=' + Date.now());
+          if (Array.isArray(j.pending) || Array.isArray(j.paired)) {
+            this.devicesPending = Array.isArray(j.pending) ? j.pending : [];
+            this.devicesPaired = Array.isArray(j.paired) ? j.paired : [];
+          } else {
+            const normalized = this.normalizeDeviceLists(j.data);
+            this.devicesPending = normalized.pending;
+            this.devicesPaired = normalized.paired;
+          }
+          if (j.raw && !silent) {
             this.log += '[devices] ' + j.raw.trim() + '\n';
           }
         } catch (e) {
           this.log += 'Failed to load devices: ' + String(e) + '\n';
         } finally {
-          this.devicesLoading = false;
+          this.devicesRequestInFlight = false;
+          if (!silent) {
+            this.devicesLoading = false;
+          }
         }
       },
 
@@ -857,7 +1001,7 @@
     </div>
 
     <!-- Devices Modal -->
-    <div x-show="showDevicesModal" x-cloak class="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50" @click.self="showDevicesModal = false">
+    <div x-show="showDevicesModal" x-cloak class="fixed inset-0 bg-black/50 dark:bg-black/70 flex items-center justify-center z-50" @click.self="closeDevicesModal()">
       <div class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl p-6 w-full max-w-lg mx-4 shadow-xl dark:shadow-none max-h-[80vh] overflow-y-auto">
         <div class="flex items-center justify-between mb-4">
           <h3 class="text-lg font-semibold" x-text="t('manageDevices')"></h3>
@@ -865,7 +1009,7 @@
             <button @click="loadDevices()" :disabled="devicesLoading" class="text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 p-2 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">
               <svg class="w-4 h-4" :class="devicesLoading && 'animate-spin'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
             </button>
-            <button @click="showDevicesModal = false" class="text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 p-2 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">
+            <button @click="closeDevicesModal()" class="text-neutral-500 hover:text-neutral-700 dark:hover:text-neutral-300 p-2 rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">
               <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
             </button>
           </div>

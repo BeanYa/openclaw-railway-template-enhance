@@ -621,6 +621,212 @@ function runCmd(cmd, args, opts = {}) {
   });
 }
 
+function parseJsonFromOutput(rawOutput) {
+  if (!rawOutput || typeof rawOutput !== "string") return null;
+  const trimmed = rawOutput.trim();
+  if (!trimmed) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {}
+
+  for (let start = 0; start < trimmed.length; start++) {
+    const startChar = trimmed[start];
+    if (startChar !== "{" && startChar !== "[") continue;
+
+    let inString = false;
+    let escape = false;
+    const stack = [startChar];
+
+    for (let end = start + 1; end < trimmed.length; end++) {
+      const ch = trimmed[end];
+
+      if (inString) {
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (ch === "\\") {
+          escape = true;
+          continue;
+        }
+        if (ch === "\"") {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === "\"") {
+        inString = true;
+        continue;
+      }
+
+      if (ch === "{" || ch === "[") {
+        stack.push(ch);
+        continue;
+      }
+
+      if (ch !== "}" && ch !== "]") continue;
+      const top = stack[stack.length - 1];
+      const matches =
+        (top === "{" && ch === "}") ||
+        (top === "[" && ch === "]");
+      if (!matches) {
+        break;
+      }
+      stack.pop();
+      if (stack.length !== 0) continue;
+
+      const candidate = trimmed.slice(start, end + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+        break;
+      }
+    }
+  }
+
+  return null;
+}
+
+const PENDING_DEVICE_STATUSES = new Set([
+  "pending",
+  "requested",
+  "requesting",
+  "awaiting",
+  "waiting",
+  "unapproved",
+]);
+
+const APPROVED_DEVICE_STATUSES = new Set([
+  "approved",
+  "paired",
+  "active",
+  "connected",
+]);
+
+function looksLikeDeviceEntry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return (
+    "requestId" in value ||
+    "request_id" in value ||
+    "deviceId" in value ||
+    "device_id" in value ||
+    (
+      "id" in value &&
+      ("status" in value || "state" in value || "createdAt" in value || "created_at" in value)
+    )
+  );
+}
+
+function normalizeDeviceEntry(value) {
+  if (!value || typeof value !== "object") return null;
+  const entry = { ...value };
+  if (entry.requestId == null && entry.request_id != null) entry.requestId = entry.request_id;
+  if (entry.deviceId == null && entry.device_id != null) entry.deviceId = entry.device_id;
+  if (entry.createdAt == null && entry.created_at != null) entry.createdAt = entry.created_at;
+  return entry;
+}
+
+function classifyDeviceContext(key) {
+  const lower = String(key || "").toLowerCase();
+  if (lower.includes("pending") || lower.includes("request")) return "pending";
+  if (
+    lower.includes("paired") ||
+    lower.includes("approved") ||
+    lower === "devices" ||
+    lower.includes("device")
+  ) {
+    return "paired";
+  }
+  return "";
+}
+
+function normalizeDeviceLists(value) {
+  const pending = [];
+  const paired = [];
+  const pendingKeys = new Set();
+  const pairedKeys = new Set();
+
+  function toKey(entry, prefix) {
+    const id =
+      entry.requestId ??
+      entry.deviceId ??
+      entry.id ??
+      entry.request_id ??
+      entry.device_id;
+    return `${prefix}:${id == null ? JSON.stringify(entry) : String(id)}`;
+  }
+
+  function pushUnique(target, keySet, entry, prefix) {
+    const key = toKey(entry, prefix);
+    if (keySet.has(key)) return;
+    keySet.add(key);
+    target.push(entry);
+  }
+
+  function classifyAndPush(rawEntry, context = "") {
+    const entry = normalizeDeviceEntry(rawEntry);
+    if (!entry) return;
+
+    const status = String(entry.status ?? entry.state ?? "").toLowerCase();
+    if (context === "pending" || PENDING_DEVICE_STATUSES.has(status)) {
+      pushUnique(pending, pendingKeys, entry, "pending");
+      return;
+    }
+    if (context === "paired" || APPROVED_DEVICE_STATUSES.has(status)) {
+      pushUnique(paired, pairedKeys, entry, "paired");
+      return;
+    }
+
+    if (entry.requestId && !entry.deviceId) {
+      pushUnique(pending, pendingKeys, entry, "pending");
+      return;
+    }
+    pushUnique(paired, pairedKeys, entry, "paired");
+  }
+
+  function walk(node, context = "") {
+    if (!node) return;
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        if (looksLikeDeviceEntry(item)) {
+          classifyAndPush(item, context);
+        } else {
+          walk(item, context);
+        }
+      }
+      return;
+    }
+
+    if (typeof node !== "object") return;
+
+    if (looksLikeDeviceEntry(node)) {
+      classifyAndPush(node, context);
+      return;
+    }
+
+    for (const [key, val] of Object.entries(node)) {
+      const nextContext = classifyDeviceContext(key) || context;
+      walk(val, nextContext);
+    }
+  }
+
+  walk(value, "");
+
+  const toTs = (entry) => {
+    const t = Date.parse(String(entry.createdAt ?? ""));
+    return Number.isNaN(t) ? 0 : t;
+  };
+  pending.sort((a, b) => toTs(b) - toTs(a));
+  paired.sort((a, b) => toTs(b) - toTs(a));
+
+  return { pending, paired };
+}
+
 const VALID_AUTH_CHOICES = [
   "openai-api-key",
   "apiKey",
@@ -1082,16 +1288,42 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     if (ok) {
       extra += "\n[setup] Configuring gateway settings...\n";
 
-      const allowInsecureResult = await runCmd(
+      let allowInsecureResult = await runCmd(
         OPENCLAW_NODE,
         clawArgs([
           "config",
           "set",
+          "--json",
           "gateway.controlUi.allowInsecureAuth",
           "true",
         ]),
       );
       extra += `[config] gateway.controlUi.allowInsecureAuth=true exit=${allowInsecureResult.code}\n`;
+      if (allowInsecureResult.code !== 0) {
+        const allowInsecureFallbackResult = await runCmd(
+          OPENCLAW_NODE,
+          clawArgs([
+            "config",
+            "set",
+            "gateway.controlUi.allowInsecureAuth",
+            "true",
+          ]),
+        );
+        extra += `[config] gateway.controlUi.allowInsecureAuth=true (fallback) exit=${allowInsecureFallbackResult.code}\n`;
+        if (allowInsecureFallbackResult.code === 0) {
+          allowInsecureResult = allowInsecureFallbackResult;
+        }
+      }
+
+      const allowInsecureVerify = await runCmd(
+        OPENCLAW_NODE,
+        clawArgs(["config", "get", "gateway.controlUi.allowInsecureAuth"]),
+      );
+      const allowInsecureCurrent = allowInsecureVerify.output.trim();
+      extra += `[config] gateway.controlUi.allowInsecureAuth current=${allowInsecureCurrent || "(empty)"}\n`;
+      if (!/\btrue\b/i.test(allowInsecureCurrent)) {
+        extra += "[warn] gateway.controlUi.allowInsecureAuth was not confirmed as true; Control UI may still require device pairing.\n";
+      }
 
       const tokenResult = await runCmd(
         OPENCLAW_NODE,
@@ -1277,12 +1509,16 @@ app.post("/setup/api/doctor", requireSetupAuth, async (_req, res) => {
 app.get("/setup/api/devices", requireSetupAuth, async (_req, res) => {
   const args = ["devices", "list", "--json", "--token", OPENCLAW_GATEWAY_TOKEN];
   const result = await runCmd(OPENCLAW_NODE, clawArgs(args));
-  try {
-    const data = JSON.parse(result.output);
-    return res.json({ ok: true, data, raw: result.output });
-  } catch {
-    return res.json({ ok: result.code === 0, raw: result.output });
-  }
+  const data = parseJsonFromOutput(result.output);
+  const normalized = normalizeDeviceLists(data);
+  res.set("Cache-Control", "no-store");
+  return res.json({
+    ok: result.code === 0,
+    data,
+    pending: normalized.pending,
+    paired: normalized.paired,
+    raw: result.output,
+  });
 });
 
 app.post("/setup/api/devices/approve", requireSetupAuth, async (req, res) => {
